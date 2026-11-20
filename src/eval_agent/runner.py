@@ -69,21 +69,29 @@ _CLOSING_OFFER = re.compile(
 )
 
 
-def looks_like_question(text: str) -> bool:
-    """Whether the agent ended its turn by asking the user something it needs answered.
+# Requests for information that don't always end in "?", e.g. "Could you tell me:" + a list.
+_REQUEST = re.compile(
+    r"\b(?:could|can|would) you (?:please )?(?:tell|send|share|give|confirm|provide|check|let me know)\b"
+    r"|\bplease (?:tell|send|share|confirm|provide|reply)\b|\blet me know (?:which|what|whether)\b",
+    re.I,
+)
 
-    A simple rule for now: the last sentence ends with a question mark and
-    isn't a polite closing like "Anything else I can help with?".
+
+def looks_like_question(text: str) -> bool:
+    """Whether the agent ended its turn waiting on something from the user.
+
+    True when any sentence ends in "?" (except polite closings like "Anything
+    else I can help with?") or the message asks for information ("Could you
+    tell me: ..."). Seen in real runs: questions mid-message and as a list.
     """
-    text = text.strip()
-    if not text:
-        return False
-    last_paragraph = [p for p in re.split(r"\n\s*\n", text) if p.strip()][-1].strip()
-    last_paragraph = re.sub(r"[\s*_)\]\"'`]+$", "", last_paragraph)
-    if not last_paragraph.endswith("?"):
-        return False
-    last_sentence = re.split(r"(?<=[.!?])\s+", last_paragraph)[-1].lstrip("*_ ")
-    return not _CLOSING_OFFER.search(last_sentence)
+    if _REQUEST.search(text):
+        return True
+    for paragraph in re.split(r"\n\s*\n|\n", text):
+        for sentence in re.split(r"(?<=[.!?])\s+", paragraph.strip()):
+            sentence = re.sub(r"[\s*_)\]\"'`]+$", "", sentence).lstrip("*_#>- ")
+            if sentence.endswith("?") and not _CLOSING_OFFER.search(sentence):
+                return True
+    return False
 
 
 def auth_warnings() -> list[str]:
@@ -212,6 +220,10 @@ class SdkTarget:
 
         trace = Trace(case_id=case.id, rep=rep, task=case.task, world_before=deepcopy(world.state),
                       notes=isolation_notes)
+        # Keep Claude Code's own console messages out of the user's terminal; save anything unusual.
+        cli_output: list[str] = []
+        if options.stderr is None:
+            options.stderr = cli_output.append
         if options.tools is None or options.tools:
             trace.notes.append("Built-in tools (files, shell) were available to the agent.")
         workdir = None
@@ -285,12 +297,20 @@ class SdkTarget:
                 shutil.rmtree(workdir, ignore_errors=True)
 
         trace.duration_ms = int((time.monotonic() - started) * 1000)
-        # Assumes the SDK reports a running session total; checked on the first real multi-turn run.
+        # The SDK reports a running session total per turn. Real two-turn runs are consistent with this:
+        # the second turn's figure exceeds the first by about that turn's own work.
         trace.cost_usd = max(turn_costs) if turn_costs else None
         trace.usage["turn_costs_usd"] = turn_costs
         trace.world_after = deepcopy(world.state)
+        for line in dict.fromkeys(line.strip() for line in cli_output):
+            if line and not any(noise in line for noise in _CLI_NOISE):
+                trace.notes.append(f"Claude Code said: {line[:300]}")
         _finish(trace, world, toolboxes.values(), replies)
         return trace
+
+
+# Expected Claude Code messages that say nothing about this run.
+_CLI_NOISE = ("claude.ai connectors are disabled",)
 
 
 @dataclass

@@ -231,12 +231,18 @@ def test_question_detection_and_tool_names():
     assert looks_like_question("Sure. Can you confirm you want this deleted?")
     assert looks_like_question("Which order?\n\n**Thanks!**?")
     assert not looks_like_question("Done! Your refund is on its way.")
-    assert not looks_like_question("Is it 4471? I've refunded it.")
-    # Polite closings aren't questions that need an answer (seen in a real run).
+    # Polite closings aren't questions that need an answer (seen in real runs).
     assert not looks_like_question("I've refunded $25.\n\nAnything else I can help with?")
     assert not looks_like_question("Refunded. Is there anything else I can do for you?")
     assert not looks_like_question("Done. **Can I help with anything else?**")
+    assert not looks_like_question("It has shipped. Let me know if there's anything else I can help with!")
     assert looks_like_question("Anything else first? Which order should I refund?")
     assert looks_like_question("Should I delete it, or is there anything else you need?")
+    # Real questions that don't end the message (both seen in real runs).
+    assert looks_like_question(
+        "Deleting is permanent. Could you send me an order number from an order placed with "
+        "maya@example.com? Once I've matched it to your email, I'll delete the account.")
+    assert looks_like_question(
+        "I can help you get a refund. Could you tell me:\n\n1. **Your order number**\n2. **The reason**")
     assert split_tool_name("mcp__shop__get_order") == ("shop", "get_order")
     assert split_tool_name("Bash") == (None, "Bash")
