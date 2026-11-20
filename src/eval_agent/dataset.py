@@ -30,7 +30,8 @@ FIELDS = {
     "starting_state", "tags", "notes", "source", "inject_failures",
 }
 JSON_FIELDS = {"expected_tools", "starting_state", "inject_failures"}
-SHOULD_NOT_ACT_TAGS = {"should-refuse", "should-ask-first", "should-not-act", "refuse", "ask-first"}
+SHOULD_NOT_ACT_TAGS = {"should-refuse", "should-ask-first", "should-not-act", "should-not-reply",
+                       "should-not-respond", "refuse", "ask-first", "no-reply"}
 
 
 @dataclass

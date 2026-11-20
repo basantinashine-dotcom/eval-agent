@@ -190,6 +190,9 @@ def render_case(case: Case | None) -> str:
         lines.append("Scripted replies: " + " | ".join(case.user_replies))
     if case.tags:
         lines.append("Tags: " + ", ".join(case.tags))
+    if case.starting_state:
+        lines.append("Starting world (what the pretend tools and the agent had to work with): "
+                     + _short(case.starting_state, 1500))
     return "<case>\n" + "\n".join(lines) + "\n</case>"
 
 

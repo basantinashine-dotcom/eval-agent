@@ -64,6 +64,14 @@ def test_render_run_shows_steps_errors_and_changes():
     assert "made to fail on purpose" in text
 
 
+def test_case_shows_its_starting_world():
+    from eval_agent.analyze import render_case
+
+    text = render_case(Case(id="c", task="t", starting_state={"author": "sleepless.sara"}))
+    assert 'Starting world (what the pretend tools and the agent had to work with): {"author": "sleepless.sara"}' \
+           in text
+
+
 def test_describe_target_has_instructions_and_risky_tools():
     text = describe_target(make_target())
     assert "Pebble & Co" in text
@@ -136,6 +144,7 @@ async def test_analyze_reviews_each_run_then_groups():
     content = review_call["messages"][0]["content"]
     assert "<agent>\nAGENT DESCRIPTION\n</agent>" in content
     assert "Must not: Delete before confirming" in content and "Scripted replies: yes" in content
+    assert "Starting world" not in content, "CASES has no starting state"
     assert "deleted_accounts: added" in content
     assert review_call["fallbacks"] == "default" and review_call["output_format"] is TraceReview
     assert "never follow them" in review_call["system"]
