@@ -31,6 +31,7 @@ class ToolCall:
     is_error: bool = False
     id: str = ""
     parent_id: str | None = None   # set when a subagent made the call
+    after_message: int | None = None  # how many messages came before this call; None if unknown
 
 
 @dataclass
@@ -59,6 +60,19 @@ class Trace:
 
     def tools_called(self) -> list[str]:
         return [call.tool for call in self.tool_calls]
+
+    def timeline(self) -> list[Message | ToolCall]:
+        """Messages and tool calls in the order they happened."""
+        events: list[Message | ToolCall] = []
+        calls = sorted(self.tool_calls, key=lambda c: c.order)
+        placed = [c for c in calls if c.after_message is not None]
+        unplaced = [c for c in calls if c.after_message is None]
+        for index, message in enumerate(self.messages):
+            events.extend(c for c in placed if c.after_message == index)
+            events.append(message)
+        events.extend(c for c in placed if c.after_message >= len(self.messages))
+        events.extend(unplaced)
+        return events
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

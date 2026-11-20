@@ -150,6 +150,19 @@ async def test_scripted_reply_answers_the_agents_question():
     assert trace.cost_usd == 0.02 and trace.usage["turn_costs_usd"] == [0.01, 0.02]
 
 
+async def test_scripted_reply_is_sent_even_when_no_question_was_spotted():
+    # Seen in a real run: "I need the order number and amount." is a request with no "?".
+    turns = [
+        lambda tb: [done("I need the order number and amount.")],
+        lambda tb: [*use(tb, "get_order", {"order_id": "4471"}, "t1"), done("Refunded.")],
+    ]
+    tgt, clients = target(*turns)
+    trace = await tgt.run(case(task="I want my money back", user_replies=["Order 4471, $25."]), 0)
+    assert clients[0].prompts == ["I want my money back", "Order 4471, $25."]
+    assert trace.replies_used == 1 and trace.status == COMPLETED
+    assert trace.notes == ["Scripted reply 1 was sent although the agent didn't clearly ask anything."]
+
+
 async def test_question_with_no_scripted_reply_left():
     tgt, clients = target(lambda tb: [done("Which order do you mean?")])
     trace = await tgt.run(case(task="I want my money back"), 0)

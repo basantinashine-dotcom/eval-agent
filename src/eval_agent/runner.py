@@ -254,7 +254,8 @@ class SdkTarget:
                                 elif isinstance(block, ToolUseBlock):
                                     server, short = split_tool_name(block.name)
                                     call = ToolCall(len(trace.tool_calls), short, server, dict(block.input),
-                                                    id=block.id, parent_id=msg.parent_tool_use_id)
+                                                    id=block.id, parent_id=msg.parent_tool_use_id,
+                                                    after_message=len(trace.messages))
                                     pending[block.id] = call
                                     trace.tool_calls.append(call)
                         elif isinstance(msg, UserMessage) and isinstance(msg.content, list):
@@ -280,16 +281,19 @@ class SdkTarget:
                         raise HarnessError("api_error", f"The agent's API call failed ({detail}): {result.errors or ''}")
 
                     trace.final_answer = (result.result or "\n".join(turn_text)).strip()
-                    if not looks_like_question(trace.final_answer):
-                        trace.status = COMPLETED
-                        break
+                    asked = looks_like_question(trace.final_answer)
                     if not replies:
-                        trace.status = ASKED_WITHOUT_ANSWER
+                        trace.status = ASKED_WITHOUT_ANSWER if asked else COMPLETED
                         break
                     user_turns += 1
                     if user_turns > self.max_user_turns:
                         trace.status = USER_TURN_LIMIT
                         break
+                    # The customer replies after every agent turn while scripted replies remain, the way a
+                    # real customer would. Spotting a question is only a guess, so it never decides this.
+                    if not asked:
+                        trace.notes.append(f"Scripted reply {trace.replies_used + 1} was sent although the "
+                                           "agent didn't clearly ask anything.")
                     prompt = replies.pop(0)
                     trace.replies_used += 1
         finally:
@@ -334,7 +338,8 @@ class CallableTarget:
         trace.final_answer = str(answer or "")
         trace.messages = [Message("user", case.task), Message("agent", trace.final_answer)]
         trace.tool_calls = [
-            ToolCall(i, c.tool, None, c.input, c.output, c.is_error) for i, c in enumerate(world.calls)
+            ToolCall(i, c.tool, None, c.input, c.output, c.is_error, after_message=1)
+            for i, c in enumerate(world.calls)
         ]
         trace.world_after = deepcopy(world.state)
         _finish(trace, world, [toolbox], [])
