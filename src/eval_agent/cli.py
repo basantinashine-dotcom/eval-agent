@@ -16,7 +16,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from .dataset import load_cases
-from .runner import run_cases, save_run
+from .runner import SdkTarget, auth_warnings, run_cases, save_run
 from .trace import RunError, Trace
 
 
@@ -56,9 +56,19 @@ def cmd_explore(args: argparse.Namespace) -> int:
         print(f"Couldn't read {args.cases}: {exc}")
         return 1
     print(report.summary(), end="\n\n")
+    if args.only:
+        wanted = [i.strip() for i in args.only.split(",") if i.strip()]
+        missing = sorted(set(wanted) - {c.id for c in cases})
+        if missing:
+            print(f"No cases with these ids: {', '.join(missing)}")
+            return 1
+        cases = [c for c in cases if c.id in wanted]
     if args.limit:
         cases = cases[: args.limit]
     target = load_target(args.target)
+    warnings = auth_warnings() if isinstance(target, SdkTarget) else []
+    for warning in warnings:
+        print(f"Warning: {warning}\n")
     print(f"Running {len(cases)} cases x {args.reps} on {target.name}...")
     started = datetime.now(UTC).isoformat(timespec="seconds")
     traces, errors = asyncio.run(
@@ -67,7 +77,7 @@ def cmd_explore(args: argparse.Namespace) -> int:
     )
     path = save_run(args.out, traces, errors, {
         "command": "explore", "target": args.target, "target_name": target.name,
-        "cases_file": str(args.cases), "reps": args.reps, "started_at": started,
+        "cases_file": str(args.cases), "reps": args.reps, "started_at": started, "warnings": warnings,
     })
     total = len(cases) * args.reps
     print(f"\n{len(traces)} of {total} runs finished; {len(errors)} couldn't run. Saved to {path}")
@@ -91,6 +101,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--target", required=True, help="module.path:function returning the target")
     p.add_argument("--cases", required=True, type=Path)
     p.add_argument("--reps", type=int, default=1)
+    p.add_argument("--only", help="comma-separated case ids to run")
     p.add_argument("--limit", type=int, default=30, help="at most this many cases (0 = all)")
     p.add_argument("--concurrency", type=int, default=2)
     p.add_argument("--timeout", type=float, default=300, help="seconds per run")

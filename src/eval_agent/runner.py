@@ -16,9 +16,12 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import os
 import re
 import shutil
+import subprocess
 import tempfile
+from collections import Counter
 import time
 from collections.abc import Awaitable, Callable
 from copy import deepcopy
@@ -57,17 +60,55 @@ class Target(Protocol):
     async def run(self, case: Case, rep: int) -> Trace: ...
 
 
-def looks_like_question(text: str) -> bool:
-    """Whether the agent ended its turn by asking the user something.
+# Polite closings that end in "?" but don't need an answer.
+_CLOSING_OFFER = re.compile(
+    r"^(?:is there |was there )?anything else\b|^(?:can|may|could) i help(?: you)? with anything else\b"
+    r"|^(?:do you )?need (?:anything|help with anything) else\b|^any (?:other|more) questions\b"
+    r"|^how else can i help\b",
+    re.I,
+)
 
-    A simple rule for now: the last sentence ends with a question mark.
+
+def looks_like_question(text: str) -> bool:
+    """Whether the agent ended its turn by asking the user something it needs answered.
+
+    A simple rule for now: the last sentence ends with a question mark and
+    isn't a polite closing like "Anything else I can help with?".
     """
     text = text.strip()
     if not text:
         return False
     last_paragraph = [p for p in re.split(r"\n\s*\n", text) if p.strip()][-1].strip()
     last_paragraph = re.sub(r"[\s*_)\]\"'`]+$", "", last_paragraph)
-    return last_paragraph.endswith("?")
+    if not last_paragraph.endswith("?"):
+        return False
+    last_sentence = re.split(r"(?<=[.!?])\s+", last_paragraph)[-1].lstrip("*_ ")
+    return not _CLOSING_OFFER.search(last_sentence)
+
+
+def auth_warnings() -> list[str]:
+    """Warn when the agent under test would run on a personal claude.ai login.
+
+    Claude Code then adds the account's email and the machine's details to the
+    agent's context, which changes how it behaves and exposes the email to test
+    runs. An Anthropic API key avoids that.
+    """
+    if os.environ.get("ANTHROPIC_API_KEY"):
+        return []
+    try:
+        from claude_agent_sdk import ClaudeAgentOptions
+        from claude_agent_sdk._internal.transport.subprocess_cli import SubprocessCLITransport
+
+        cli = SubprocessCLITransport(prompt="", options=ClaudeAgentOptions())._find_cli()
+        out = subprocess.run([cli, "auth", "status"], capture_output=True, text=True, timeout=30)
+        status = json.loads(out.stdout)
+    except Exception:
+        return []  # can't tell; don't guess
+    if status.get("authMethod") == "claude.ai":
+        return ["Your agent will run on your personal Claude login, so Claude Code adds your account email "
+                "and this computer's details to what it sees. Results may not match how it behaves for real "
+                "users. Set ANTHROPIC_API_KEY to run it cleanly."]
+    return []
 
 
 def split_tool_name(full_name: str) -> tuple[str | None, str]:
@@ -100,6 +141,25 @@ def _check_failures(case: Case, toolboxes: dict[str, Toolbox]) -> None:
     unknown = set(case.inject_failures) - known
     if unknown:
         raise HarnessError("harness_error", f"Case {case.id} makes unknown tools fail: {sorted(unknown)}")
+
+
+def isolate(options: Any) -> list[str]:
+    """Keep the developer's own Claude Code setup out of the agent under test.
+
+    Without this, the agent also loads the developer's plugins, skills and
+    claude.ai connectors (which have no fakes and could act for real), and
+    behaves differently from how it would in production.
+    Returns notes for the trace about anything the agent's own options asked for.
+    """
+    notes = []
+    if options.setting_sources:
+        notes.append(f"Your agent loads Claude Code settings ({', '.join(options.setting_sources)}); "
+                     "the eval runs it without your personal settings.")
+    if options.skills:
+        notes.append("Your agent enables skills; the eval runs it without your installed skills.")
+    options.setting_sources = []
+    options.strict_mcp_config = True
+    return notes
 
 
 def _default_client(options: Any, toolboxes: dict[str, Toolbox]) -> Any:
@@ -148,8 +208,10 @@ class SdkTarget:
         _check_failures(case, toolboxes)
         options = self.options_factory()
         self._swap_servers(options, toolboxes)
+        isolation_notes = isolate(options)
 
-        trace = Trace(case_id=case.id, rep=rep, task=case.task, world_before=deepcopy(world.state))
+        trace = Trace(case_id=case.id, rep=rep, task=case.task, world_before=deepcopy(world.state),
+                      notes=isolation_notes)
         if options.tools is None or options.tools:
             trace.notes.append("Built-in tools (files, shell) were available to the agent.")
         workdir = None
@@ -265,9 +327,10 @@ def _finish(trace: Trace, world: FakeWorld, toolboxes: Any, unused_replies: list
         raise HarnessError("fake_tool_crashed",
                            "A pretend tool crashed, so this run doesn't show what your agent would do: "
                            + "; ".join(crashes))
-    for call in world.calls:
-        if call.injected_failure:
-            trace.notes.append(f"{call.tool} was made to fail on purpose ({call.injected_failure}).")
+    failed = Counter((c.tool, c.injected_failure) for c in world.calls if c.injected_failure)
+    for (tool, mode), count in failed.items():
+        times = "" if count == 1 else f", {count} times"
+        trace.notes.append(f"{tool} was made to fail on purpose ({mode}{times}).")
     if unused_replies:
         trace.notes.append(f"{len(unused_replies)} scripted replies weren't needed.")
 

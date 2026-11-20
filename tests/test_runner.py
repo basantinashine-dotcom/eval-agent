@@ -98,6 +98,42 @@ async def test_records_tool_calls_world_changes_and_cost():
     # The agent's own server was swapped for the fakes, keeping the same tool names.
     assert set(clients[0].options.mcp_servers) == {"shop"}
     assert clients[0].options.mcp_servers["shop"]["instance"] is not None
+    # And the developer's own Claude Code setup is kept out.
+    assert clients[0].options.strict_mcp_config is True
+    assert clients[0].options.setting_sources == []
+    assert trace.notes == []
+
+
+async def test_agent_asking_for_settings_gets_a_note():
+    def options_with_settings():
+        options = agent.build_options()
+        options.setting_sources = ["user", "project"]
+        return options
+
+    tgt, clients = target(lambda tb: [done("ok")], options_factory=options_with_settings)
+    trace = await tgt.run(case(), 0)
+    assert clients[0].options.setting_sources == []
+    assert "without your personal settings" in trace.notes[0]
+
+
+def test_auth_warning_only_for_personal_login(monkeypatch):
+    import subprocess
+
+    from claude_agent_sdk._internal.transport.subprocess_cli import SubprocessCLITransport
+
+    from eval_agent import runner
+
+    monkeypatch.setattr(SubprocessCLITransport, "_find_cli", lambda self: "claude.exe")
+    status = {"authMethod": "claude.ai"}
+    monkeypatch.setattr(runner.subprocess, "run",
+                        lambda *a, **k: subprocess.CompletedProcess(a, 0, json.dumps(status), ""))
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    assert "ANTHROPIC_API_KEY" in runner.auth_warnings()[0]
+    status["authMethod"] = "api_key"
+    assert runner.auth_warnings() == []
+    status["authMethod"] = "claude.ai"
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    assert runner.auth_warnings() == []
 
 
 async def test_scripted_reply_answers_the_agents_question():
@@ -146,10 +182,11 @@ async def test_unfaked_tool_server_stops_the_run():
 
 
 async def test_injected_failure_reaches_the_agent_and_is_noted():
-    tgt, _ = target(lambda tb: [*use(tb, "send_email", {"to": "m", "subject": "s", "body": "b"}, "t1"), done("ok")])
+    email = {"to": "m", "subject": "s", "body": "b"}
+    tgt, _ = target(lambda tb: [*use(tb, "send_email", email, "t1"), *use(tb, "send_email", email, "t2"), done("ok")])
     trace = await tgt.run(case(inject_failures={"send_email": {"mode": "error", "times": "all"}}), 0)
-    assert trace.tool_calls[0].is_error
-    assert trace.notes[-1] == "send_email was made to fail on purpose (error)."
+    assert trace.tool_calls[0].is_error and trace.tool_calls[1].is_error
+    assert trace.notes == ["send_email was made to fail on purpose (error, 2 times)."]
     assert "emails" not in trace.world_after
 
 
@@ -195,5 +232,11 @@ def test_question_detection_and_tool_names():
     assert looks_like_question("Which order?\n\n**Thanks!**?")
     assert not looks_like_question("Done! Your refund is on its way.")
     assert not looks_like_question("Is it 4471? I've refunded it.")
+    # Polite closings aren't questions that need an answer (seen in a real run).
+    assert not looks_like_question("I've refunded $25.\n\nAnything else I can help with?")
+    assert not looks_like_question("Refunded. Is there anything else I can do for you?")
+    assert not looks_like_question("Done. **Can I help with anything else?**")
+    assert looks_like_question("Anything else first? Which order should I refund?")
+    assert looks_like_question("Should I delete it, or is there anything else you need?")
     assert split_tool_name("mcp__shop__get_order") == ("shop", "get_order")
     assert split_tool_name("Bash") == (None, "Bash")
