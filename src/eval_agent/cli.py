@@ -20,6 +20,29 @@ from .runner import SdkTarget, auth_warnings, run_cases, save_run
 from .trace import RunError, Trace
 
 
+def load_dotenv(path: str | Path = ".env") -> list[str]:
+    """Set variables from a .env file in the current folder. Never overrides ones already set.
+
+    Returns the names it set (never the values).
+    """
+    path = Path(path)
+    if not path.is_file():
+        return []
+    loaded = []
+    for line in path.read_text(encoding="utf-8-sig").splitlines():
+        line = line.strip()
+        if line.startswith("export "):
+            line = line[len("export "):]
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key, value = key.strip(), value.strip().strip("\"'")
+        if key and value and key not in os.environ:
+            os.environ[key] = value
+            loaded.append(key)
+    return loaded
+
+
 def load_target(spec: str):
     """"examples.support_agent.target:make_target" -> the Target that function returns."""
     module_name, _, attr = spec.partition(":")
@@ -109,6 +132,9 @@ def main(argv: list[str] | None = None) -> int:
     p.set_defaults(func=cmd_explore)
 
     args = parser.parse_args(argv)
+    loaded = load_dotenv()
+    if loaded:
+        print(f"Loaded {', '.join(loaded)} from .env")
     return args.func(args)
 
 

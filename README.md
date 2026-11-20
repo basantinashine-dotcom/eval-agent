@@ -33,6 +33,9 @@ eval-agent explore --target module:function --cases PATH
 Running the sample agent needs Claude Code (`claude.exe`) installed and an Anthropic API key. It
 makes real model calls, which cost money.
 
+Copy `.env.example` to `.env` and put your key in it; `eval-agent` reads it automatically and git
+ignores it.
+
 Use an API key (`ANTHROPIC_API_KEY`), not your personal Claude login. On a claude.ai login, Claude
 Code adds your account email and your computer's details to the agent's context, which changes how
 it behaves; `explore` warns when that's the case. The runner also keeps your own Claude Code
