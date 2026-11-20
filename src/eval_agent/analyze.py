@@ -243,10 +243,10 @@ class AnalysisError(Exception):
 
 
 async def _ask(client: Any, model: str, effort: str, system: str, content: str, schema: type[BaseModel],
-               spend: Spend) -> Any:
+               spend: Spend, max_tokens: int = 16000) -> Any:
     response = await client.beta.messages.parse(
         model=model,
-        max_tokens=16000,
+        max_tokens=max_tokens,
         # On a safety decline, the API retries on a fallback model within the same call.
         betas=["server-side-fallback-2026-07-01"],
         fallbacks="default",

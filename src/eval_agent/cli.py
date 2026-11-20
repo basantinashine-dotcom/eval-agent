@@ -4,6 +4,8 @@
     eval-agent explore --target MOD:FN --cases PATH
                                                   run the agent on cases with pretend tools; save traces
     eval-agent analyze [RUN]                      find what went wrong and group it into failure types
+    eval-agent generate --target MOD:FN --cases PATH
+                                                  write new test cases that cover what yours miss
 """
 
 from __future__ import annotations
@@ -161,6 +163,48 @@ def cmd_analyze(args: argparse.Namespace) -> int:
     return 0 if analysis.reviews else 1
 
 
+def cmd_generate(args: argparse.Namespace) -> int:
+    from dataclasses import asdict
+
+    from .analyze import MODEL, describe_target
+    from .generate import MAX_COUNT, build_prompt, estimate_cost, fake_tool_names, generate_cases
+    from .trace import write_jsonl
+
+    try:
+        cases, report = load_cases(args.cases)
+    except (OSError, ValueError) as exc:
+        print(f"Couldn't read {args.cases}: {exc}")
+        return 1
+    target = load_target(args.target)
+    agent = describe_target(target)
+    count = max(1, min(args.count, MAX_COUNT))
+    model = args.model or MODEL
+    estimate = estimate_cost(build_prompt(agent, cases, report, count), count, model)
+    print(f"Writing {count} new cases for {target.name} with {model}. Estimated cost: up to ${estimate:.2f}.")
+    if estimate > args.max_cost:
+        print(f"That's more than --max-cost (${args.max_cost:.2f}). Raise it to go ahead.")
+        return 1
+
+    kept, dropped, spend = asyncio.run(
+        generate_cases(agent, cases, report, fake_tool_names(target), count=count, model=model))
+    stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
+    out = args.out or args.cases.parent / "added" / f"{args.cases.stem}-generated-{stamp}.jsonl"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    write_jsonl(out, [asdict(case) for case in kept])
+
+    print(f"\nI wrote {len(kept)} new cases to {out}:")
+    for case in kept:
+        task = case.task if len(case.task) <= 70 else case.task[:67] + "..."
+        print(f"  {case.id}: \"{task}\" [{', '.join(case.tags)}]\n      {case.notes}")
+    if dropped:
+        print(f"\nI dropped {len(dropped)} that couldn't run as written:")
+        for reason in dropped:
+            print(f"  - {reason}")
+    print(f"\nCost: about ${spend.cost_usd:.2f}. These are suggestions: read them, delete any you don't want, "
+          f"then run them with\n  eval-agent explore --target {args.target} --cases {out}")
+    return 0 if kept else 1
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="eval-agent", description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -189,6 +233,15 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--max-cost", type=float, default=2.0, help="stop if the estimate is above this, in $")
     p.add_argument("--concurrency", type=int, default=4)
     p.set_defaults(func=cmd_analyze)
+
+    p = sub.add_parser("generate", help="write new test cases that cover what yours miss")
+    p.add_argument("--target", required=True, help="module.path:function returning the target")
+    p.add_argument("--cases", required=True, type=Path, help="your existing cases (left untouched)")
+    p.add_argument("--count", type=int, default=10, help="how many to write (up to 15)")
+    p.add_argument("--out", type=Path, help="where to write them (default: added/ next to your cases)")
+    p.add_argument("--model", help="Claude model to write with (default: claude-opus-5-5)")
+    p.add_argument("--max-cost", type=float, default=1.0, help="stop if the estimate is above this, in $")
+    p.set_defaults(func=cmd_generate)
 
     args = parser.parse_args(argv)
     loaded = load_dotenv()
