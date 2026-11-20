@@ -113,7 +113,9 @@ Merge problems that have the same underlying behavior, even when the details dif
 problems that look alike but have different causes or need different fixes. Give each failure \
 type a short name someone could say out loud, and explain it in words a 15-year-old would follow.
 
-List the run keys where each failure type appears, using the keys exactly as given. If a review \
+List the run keys where each failure type appears, using the keys exactly as given. Keys that \
+share a case name and differ only in the number after "#" are repeated tries of the same test; \
+the agent can behave differently each time, so list every try where the failure appears. If a review \
 reported something that isn't really a failure (for example, the expected outcome allows it), \
 leave it out of the failure types and list it under not_failures with a short reason.
 

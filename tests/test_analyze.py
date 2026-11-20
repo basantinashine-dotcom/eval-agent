@@ -150,6 +150,31 @@ async def test_report_reads_plainly():
     assert not re.search(r"\d+(\.\d+)?%", report), "counts, not percentages"
 
 
+async def test_report_counts_repeated_tries_per_case():
+    def again(trace, rep):
+        copy = Trace.from_dict(trace.to_dict())
+        copy.rep = rep
+        return copy
+
+    class OnlyFirstDeleteFails(FakeMessages):
+        async def parse(self, **kw):
+            if kw["output_format"] is Grouping:
+                return response(Grouping(failure_types=[FailureType(
+                    name="Deletes without asking", definition="d", starts_at="s", severity="critical",
+                    traces=["del#0", "del#2"], example="e", likely_cause="c", check_type="code", check_idea="i")],
+                    not_failures=[]))
+            return await super().parse(**kw)
+
+    traces = [DELETE, again(DELETE, 1), again(DELETE, 2), STATUS, again(STATUS, 1), again(STATUS, 2)]
+    client = SimpleNamespace(beta=SimpleNamespace(messages=OnlyFirstDeleteFails()))
+    analysis = await analyze_run(traces, CASES, "agent", client=client)
+    report = analysis_markdown(analysis, agent_name="a", run_name="r")
+    assert "I read 6 of 6 runs of your agent: 2 cases, up to 3 tries each." in report
+    assert "1 of 2 cases looked fine every time." in report
+    assert "**Seen in:** 2 of 6 runs, in 1 of 2 cases (del (2 of 3 tries))." in report
+    assert "## Cases that looked fine every time\n\nstatus." in report
+
+
 def test_estimate_is_positive_and_scales():
     one = estimate_cost([STATUS], {}, "agent")
     two = estimate_cost([STATUS, DELETE], CASES, "agent")
