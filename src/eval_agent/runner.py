@@ -319,11 +319,16 @@ _CLI_NOISE = ("claude.ai connectors are disabled",)
 
 @dataclass
 class CallableTarget:
-    """Custom code: fn(case, toolbox) returns the agent's final answer (sync or async)."""
+    """Custom code: fn(case, toolbox) returns the agent's final answer (sync or async).
+
+    instructions: what the agent is told and the rules its code enforces, so the
+    analyzer can understand it (it can't read a system prompt from custom code).
+    """
 
     name: str
     fn: Callable[[Case, Toolbox], str | Awaitable[str]]
     fakes: Callable[[], list[FakeTool]]
+    instructions: str = ""
 
     async def run(self, case: Case, rep: int) -> Trace:
         world = FakeWorld(case.starting_state)

@@ -140,6 +140,8 @@ def describe_target(target: Any) -> str:
         lines.append("Instructions (system prompt):\n" + (prompt or "(none set)").strip())
         if options.tools is None or options.tools:
             lines.append("Built-in Claude Code tools are also available.")
+    elif getattr(target, "instructions", ""):
+        lines.append("Instructions and rules (from the agent's code):\n" + target.instructions.strip())
     else:
         lines.append("Instructions: not available (custom code).")
     lines.append("Tools:")

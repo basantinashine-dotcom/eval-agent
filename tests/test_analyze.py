@@ -71,6 +71,18 @@ def test_describe_target_has_instructions_and_risky_tools():
     assert "- get_order(order_id)" in text and "get_order(order_id): Look up an order by its ID. Returns" in text
 
 
+def test_describe_custom_code_target_uses_its_instructions():
+    from eval_agent.fakes import FakeTool
+    from eval_agent.runner import CallableTarget
+
+    tools = lambda: [FakeTool("reply", "Post a reply", {"text": str}, lambda a, w: "ok", side_effect=True)]
+    bare = describe_target(CallableTarget("x", lambda case, tb: "", tools))
+    assert "Instructions: not available (custom code)." in bare
+    told = describe_target(CallableTarget("x", lambda case, tb: "", tools, instructions="Never reply to crisis posts."))
+    assert "Instructions and rules (from the agent's code):\nNever reply to crisis posts." in told
+    assert "- reply(text): Post a reply [changes things in the real world]" in told
+
+
 class FakeMessages:
     def __init__(self):
         self.calls = []
