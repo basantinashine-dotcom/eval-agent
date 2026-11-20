@@ -5,3 +5,10 @@ __pycache__/
 dist/
 build/
 *.egg-info/
+.pytest_cache/
+
+# Eval runs (traces can contain your agent's data)
+runs/
+
+# Local "real" data written by the sample agent's tools
+examples/support_agent/data/

@@ -1,0 +1,28 @@
+[build-system]
+requires = ["hatchling>=1.18"]
+build-backend = "hatchling.build"
+
+[project]
+name = "eval-agent"
+version = "0.0.1"
+description = "Give it your agent's repo; it writes, tests and runs evals for it."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+dependencies = [
+    "claude-agent-sdk>=0.2.163",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.23"]
+
+[project.scripts]
+eval-agent = "eval_agent.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/eval_agent"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src", "."]
+asyncio_mode = "auto"
