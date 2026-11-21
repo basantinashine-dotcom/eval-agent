@@ -6,4 +6,4 @@ from . import agent, fakes
 
 
 def make_target() -> SdkTarget:
-    return SdkTarget("pebble-support", agent.build_options, {"shop": fakes.shop_fakes})
+    return SdkTarget("pebble-support", agent.build_options, {"shop": fakes.shop_fakes}, example_world=agent.SEED)

@@ -78,10 +78,12 @@ def _slug(text: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")[:60] or "case"
 
 
-def build_prompt(agent: str, cases: list[Case], report: DatasetReport, count: int) -> str:
+def build_prompt(agent: str, cases: list[Case], report: DatasetReport, count: int,
+                 example_world: dict[str, Any] | None = None) -> str:
     listing = "\n".join(f"- {c.id}: {c.task} -> {c.expected_outcome or '(no expected outcome)'} "
                         f"[{', '.join(c.tags)}]" for c in cases)
-    example = next((c.starting_state for c in cases if c.starting_state), {})
+    # The target's own example shows the shape its pretend tools expect; otherwise borrow a case's.
+    example = example_world or next((c.starting_state for c in cases if c.starting_state), {})
     return (
         f"<agent>\n{agent}\n</agent>\n\n"
         f"<existing_cases>\n{listing or '(none yet)'}\n\nHow they were read:\n{report.summary()}\n</existing_cases>\n\n"
@@ -144,15 +146,15 @@ def estimate_cost(prompt: str, count: int, model: str = MODEL) -> float:
 
 
 async def generate_cases(agent: str, cases: list[Case], report: DatasetReport, tools: set[str], *,
-                         count: int = 10, client: Any = None, model: str = MODEL,
-                         effort: str = "high") -> tuple[list[Case], list[str], Spend]:
+                         count: int = 10, client: Any = None, model: str = MODEL, effort: str = "high",
+                         example_world: dict[str, Any] | None = None) -> tuple[list[Case], list[str], Spend]:
     count = max(1, min(count, MAX_COUNT))
     if client is None:
         import anthropic
 
         client = anthropic.AsyncAnthropic()
     spend = Spend()
-    prompt = build_prompt(agent, cases, report, count)
+    prompt = build_prompt(agent, cases, report, count, example_world)
     # 20k output tokens: room for thinking plus 15 cases, and under the SDK's non-streaming limit.
     generated = await _ask(client, model, effort, SYSTEM, prompt, Generated, spend, max_tokens=20000)
     kept, dropped = validate(generated, tools, cases)

@@ -1,5 +1,6 @@
 """eval-agent: write, test and run evals for tool-using agents.
 
+    eval-agent setup [REPO]                       read an agent's repo; write its target and pretend tools
     eval-agent cases PATH                         show how a golden dataset was read
     eval-agent explore --target MOD:FN --cases PATH
                                                   run the agent on cases with pretend tools; save traces
@@ -21,7 +22,7 @@ from pathlib import Path
 
 from .dataset import load_cases
 from .runner import SdkTarget, auth_warnings, run_cases, save_run
-from .trace import RunError, Trace, read_traces
+from .trace import MAX_TURNS, USER_TURN_LIMIT, RunError, Trace, read_traces
 
 
 def load_dotenv(path: str | Path = ".env") -> list[str]:
@@ -179,14 +180,16 @@ def cmd_generate(args: argparse.Namespace) -> int:
     agent = describe_target(target)
     count = max(1, min(args.count, MAX_COUNT))
     model = args.model or MODEL
-    estimate = estimate_cost(build_prompt(agent, cases, report, count), count, model)
+    example_world = getattr(target, "example_world", None) or {}
+    estimate = estimate_cost(build_prompt(agent, cases, report, count, example_world), count, model)
     print(f"Writing {count} new cases for {target.name} with {model}. Estimated cost: up to ${estimate:.2f}.")
     if estimate > args.max_cost:
         print(f"That's more than --max-cost (${args.max_cost:.2f}). Raise it to go ahead.")
         return 1
 
     kept, dropped, spend = asyncio.run(
-        generate_cases(agent, cases, report, fake_tool_names(target), count=count, model=model))
+        generate_cases(agent, cases, report, fake_tool_names(target), count=count, model=model,
+                       example_world=example_world))
     stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
     out = args.out or args.cases.parent / "added" / f"{args.cases.stem}-generated-{stamp}.jsonl"
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -205,10 +208,135 @@ def cmd_generate(args: argparse.Namespace) -> int:
     return 0 if kept else 1
 
 
+def smoke_run(root: Path, spec: str, tool_map: dict, out: str, timeout_s: float):
+    """Run the agent once on the setup step's simple task, and notice if any repo file changed (FR-6)."""
+    from .check import changed_files, snapshot
+    from .dataset import Case
+    from .toolmap import SmokeResult
+
+    smoke = SmokeResult(task=(tool_map.get("smoke_task") or "").strip())
+    if not smoke.task:
+        smoke.error = "The setup step didn't suggest a first task."
+        return smoke, ""
+    previous = os.getcwd()
+    os.chdir(root)  # agents often read config relative to their own folder
+    package = spec.split(".", 1)[0]
+    for name in [m for m in sys.modules if m == package or m.startswith(package + ".")]:
+        del sys.modules[name]  # an `evals` imported from somewhere else must not shadow this repo's
+    try:
+        before = snapshot(root)
+        try:
+            target = load_target(spec)
+        except Exception as exc:
+            smoke.error = f"Couldn't load the target: {type(exc).__name__}: {exc}"
+            return smoke, ""
+        case = Case(id="first-run", task=smoke.task, user_replies=list(tool_map.get("smoke_replies") or []),
+                    starting_state=dict(getattr(target, "example_world", None) or {}), tags=["setup"],
+                    source="synthetic")
+        traces, errors = asyncio.run(run_cases(target, [case], reps=1, concurrency=1, timeout_s=timeout_s))
+        smoke.changed_files = changed_files(before, snapshot(root))
+        path = save_run(root / out / "runs", traces, errors, {
+            "command": "setup", "target": spec, "target_name": target.name, "smoke_task": smoke.task})
+    finally:
+        os.chdir(previous)
+    if errors:
+        smoke.error = f"[{errors[0].kind}] {errors[0].message}"
+    if traces:
+        trace = traces[0]
+        smoke.ran, smoke.status = True, trace.status
+        # Show its answer to the task itself, not to a later scripted reply.
+        first = next((m.text for m in trace.messages if m.role == "agent"), trace.final_answer)
+        smoke.tools, smoke.answer, smoke.cost_usd = trace.tools_called(), first, trace.cost_usd
+        if trace.status in (MAX_TURNS, USER_TURN_LIMIT):
+            smoke.error = f"It didn't finish ({trace.status})."
+    return smoke, str(path)
+
+
+def cmd_setup(args: argparse.Namespace) -> int:
+    from .intake import MODEL, RepoFiles, estimate_cost, run_intake
+    from .toolmap import summary, tool_map_data, tool_map_yaml
+
+    root = args.repo.resolve()
+    if not root.is_dir():
+        print(f"{args.repo} isn't a folder. Point me at your agent's repo (a local folder).")
+        return 1
+    out = args.out.strip("/\\")
+    existing = [name for name in ("target.py", "fakes.py", "tool_map.yaml") if (root / out / name).exists()]
+    if existing and not args.force:
+        print(f"{out}/ in {root.name} already has {', '.join(existing)}. Use --force to replace them, or --out to "
+              "write somewhere else.")
+        return 1
+    files = RepoFiles(root, out, tuple(args.exclude or ()), overwrite=args.force)
+    model = args.model or MODEL
+    estimate = estimate_cost(files)
+    print(f"I'll read {root.name} ({len(files.files())} files I'm allowed to read) with {model}, find your agent "
+          f"and its tools, and write pretend versions of the tools into {out}/. I won't change your code.")
+    print(f"Estimated cost: up to about ${estimate:.2f}. It stops at ${args.max_cost:.2f} (--max-cost).")
+    if not args.no_smoke:
+        print("Then I'll run your agent once on a simple task, which makes your agent's own model calls.")
+    for warning in auth_warnings():
+        print(f"Warning: {warning}")
+    if estimate > args.max_cost:
+        print(f"That's more than --max-cost (${args.max_cost:.2f}). Raise it to go ahead.")
+        return 1
+    print()
+
+    result, files = asyncio.run(run_intake(root, out=out, model=model, max_cost=args.max_cost,
+                                           note=args.note or "", emit=lambda line: print(f"  {line}", flush=True),
+                                           files=files))
+    spec = f"{out.replace('/', '.')}.target:make_target"
+    print()
+    if not result.ok:
+        print("I couldn't finish setting up your agent.")
+        if result.stopped:
+            print(result.stopped)
+        if result.check is not None and not result.check.ok:
+            print("The last check said:\n" + result.check.text())
+        elif result.map is None:
+            print("I didn't get as far as a tool map.")
+        if result.final_text:
+            print(f"My last words: {result.final_text}")
+        for note in result.notes[:5]:
+            print(f"Claude Code said: {note}")
+        if result.written:
+            print(f"Files I wrote (keep or delete them): {', '.join(result.written)}")
+        print(f"Cost: ${result.cost_usd:.2f}.")
+        return 1
+
+    data = tool_map_data(result.map, result.check, spec)
+    (root / out / "tool_map.yaml").write_text(tool_map_yaml(data), encoding="utf-8")
+    written = result.written + [f"{out}/tool_map.yaml"]
+    gitignore = root / out / ".gitignore"
+    if not gitignore.exists():
+        gitignore.write_text("runs/\n", encoding="utf-8")
+        written.append(f"{out}/.gitignore")
+
+    smoke, run_dir = (None, "") if args.no_smoke else smoke_run(root, spec, result.map, out, args.timeout)
+    print(summary(data, sorted(written), result.cost_usd, smoke, run_dir))
+    print(f"\nNext:\n  1. Read {out}/tool_map.yaml and fix anything that's wrong.\n"
+          f"  2. From {root.name}'s folder, run your test cases:\n"
+          f"       eval-agent explore --target {spec} --cases YOUR_CASES.jsonl\n"
+          "     No test cases yet? A .jsonl file with one {\"task\": ..., \"expected_outcome\": ...} per line "
+          "is enough.")
+    return 0 if smoke is None or smoke.ok else 2
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="eval-agent", description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="command", required=True)
+
+    p = sub.add_parser("setup", help="read an agent's repo and write the target and pretend tools for it")
+    p.add_argument("repo", nargs="?", type=Path, default=Path("."), help="the agent's repo folder (default: here)")
+    p.add_argument("--out", default="evals", help="folder inside the repo to write into (default: evals)")
+    p.add_argument("--note", help="anything the Eval Agent should know, e.g. where the agent starts")
+    p.add_argument("--exclude", action="append", metavar="GLOB", help="files it must not read (repeatable)")
+    p.add_argument("--model", help="Claude model to read with (default: claude-opus-5-5)")
+    p.add_argument("--max-cost", type=float, default=3.0, help="stop reading at this cost, in $")
+    p.add_argument("--force", action="store_true", help="replace target.py, fakes.py and tool_map.yaml if there")
+    p.add_argument("--no-smoke", action="store_true", help="don't run the agent once at the end")
+    p.add_argument("--timeout", type=float, default=300, help="seconds for that first run")
+    p.set_defaults(func=cmd_setup)
 
     p = sub.add_parser("cases", help="show how a golden dataset was read")
     p.add_argument("path", type=Path)

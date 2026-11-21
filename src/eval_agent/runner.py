@@ -183,6 +183,7 @@ class SdkTarget:
     options_factory: returns the agent's own ClaudeAgentOptions.
     fakes: MCP server name -> function returning that server's fake tools.
     real_servers_ok: servers the user said are safe to call for real.
+    example_world: a small made-up world the fakes work on, to show its shape.
     """
 
     name: str
@@ -191,6 +192,7 @@ class SdkTarget:
     real_servers_ok: frozenset[str] = frozenset()
     max_user_turns: int = 5
     client_factory: Callable[[Any, dict[str, Toolbox]], Any] = field(default=_default_client)
+    example_world: dict[str, Any] = field(default_factory=dict)
 
     def _swap_servers(self, options: Any, toolboxes: dict[str, Toolbox]) -> None:
         servers = options.mcp_servers
@@ -323,12 +325,14 @@ class CallableTarget:
 
     instructions: what the agent is told and the rules its code enforces, so the
     analyzer can understand it (it can't read a system prompt from custom code).
+    example_world: a small made-up world the fakes work on, to show its shape.
     """
 
     name: str
     fn: Callable[[Case, Toolbox], str | Awaitable[str]]
     fakes: Callable[[], list[FakeTool]]
     instructions: str = ""
+    example_world: dict[str, Any] = field(default_factory=dict)
 
     async def run(self, case: Case, rep: int) -> Trace:
         world = FakeWorld(case.starting_state)

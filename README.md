@@ -12,6 +12,8 @@ v1 focuses on tool-using agents built on the Claude Agent SDK or in custom Pytho
 ## What works so far
 
 ```
+eval-agent setup [REPO]        read your agent's repo, find its tools, and write pretend versions
+                               of them into evals/ (then run the agent once to prove it works)
 eval-agent cases PATH          read a golden dataset (JSONL, JSON or CSV) and say how it was read
 eval-agent explore --target module:function --cases PATH [--reps 3]
                                run the agent on each case with pretend tools; save traces
@@ -20,8 +22,22 @@ eval-agent generate --target module:function --cases PATH
                                write new test cases that cover what yours miss (into added/)
 ```
 
-`analyze` and `generate` call Claude and show a cost estimate first (`--max-cost` stops them).
+`setup`, `analyze` and `generate` call Claude and show a cost estimate first (`--max-cost` stops them).
 
+- **Setup** (`eval_agent/intake.py`, `check.py`, `toolmap.py`): an agent built on the Claude Agent SDK
+  reads your repo and writes `evals/target.py` and `evals/fakes.py` itself, for Claude Agent SDK agents
+  and custom code. It:
+  - can read only files git doesn't ignore, never `.env` or other files that look like they hold
+    secrets, and can write only inside `evals/`. It runs no commands and never edits your code;
+  - checks what it wrote before trusting it: the file can't run commands or touch the network, and it
+    loads in a separate process with the network blocked. Every real tool has a pretend version with
+    the same name, description and schema, and each pretend tool runs once without crashing;
+  - writes `evals/tool_map.yaml` (which tools change things in the real world, what was patched for
+    testing, what it thinks your agent must never do) for you to check;
+  - runs your agent once on a simple task and says if any file in your repo changed.
+
+  Tried on a copy of the sample agent (without its answer key) and on the Threads reply agent (custom
+  code): both passed their checks on the first try, for $0.13 and $0.59.
 - **Pretend tools** (`eval_agent/fakes.py`): same names and schemas as the real ones, acting
   on a fresh world per run. They record every call and can be made to fail.
 - **Runner** (`eval_agent/runner.py`):
@@ -61,3 +77,7 @@ pytest
 eval-agent cases examples/support_agent/cases.jsonl
 eval-agent explore --target examples.support_agent.target:make_target --cases examples/support_agent/cases.jsonl
 ```
+
+For your own agent, start with `eval-agent setup path/to/your/repo`, then run `explore` from your
+repo's folder with `--target evals.target:make_target`. Your agent's packages need to be installed
+where eval-agent runs.
