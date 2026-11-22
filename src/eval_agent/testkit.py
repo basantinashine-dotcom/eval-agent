@@ -27,7 +27,7 @@ from typing import Any, Literal
 from .dataset import Case
 from .trace import Message, ToolCall, Trace
 
-Status = Literal["pass", "fail", "skip"]
+Status = Literal["pass", "fail", "skip", "flag"]   # flag: an untrusted judge's failure, shown but not counted
 
 
 @dataclass
