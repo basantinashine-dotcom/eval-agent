@@ -5,9 +5,7 @@ import sys
 import pytest
 import yaml
 from claude_agent_sdk import AssistantMessage, ResultMessage, TextBlock
-from mcp import types
-
-from eval_agent.check import CheckResult, ToolInfo
+from eval_agent.check import CheckResult, ToolInfo, call_server_tool
 from eval_agent.cli import main, smoke_run
 from eval_agent.intake import RepoFiles, estimate_cost, run_intake, secret_reason
 from eval_agent.toolmap import SmokeResult, map_problems, summary, tool_map_data, tool_map_yaml
@@ -114,13 +112,6 @@ def test_estimate_grows_with_the_code(tmp_path):
 
 # --- The setup agent's session, with a scripted stand-in for Claude --------------------------------------
 
-async def call_tool(server, name, args):
-    handler = server.request_handlers[types.CallToolRequest]
-    response = await handler(types.CallToolRequest(
-        method="tools/call", params=types.CallToolRequestParams(name=name, arguments=args)))
-    return "".join(c.text for c in response.root.content), bool(response.root.isError)
-
-
 class ScriptedIntake:
     """Stands in for ClaudeSDKClient: each query runs the next list of (tool, args) through the real tools."""
 
@@ -139,7 +130,7 @@ class ScriptedIntake:
     async def query(self, prompt):
         self.prompts.append(prompt)
         for name, args in (self.turns.pop(0) if self.turns else []):
-            self.outputs.append((name, *await call_tool(self.server, name, args)))
+            self.outputs.append((name, *await call_server_tool(self.server, name, args)))
 
     async def receive_response(self):
         yield AssistantMessage(content=[TextBlock(text="Done: the notes agent is set up.")], model="m")

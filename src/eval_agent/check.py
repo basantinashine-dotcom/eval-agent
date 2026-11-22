@@ -26,6 +26,8 @@ import json
 import os
 import subprocess
 import sys
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -260,17 +262,56 @@ def _sample_value(name: str, prop: dict[str, Any]) -> Any:
     return "test@example.com" if "email" in name.lower() else "test-1"
 
 
-async def _list_server_tools(config: Any) -> list[Any] | None:
-    """Tools of an in-process SDK server, or None for an external server we won't start."""
-    from mcp import types
+@asynccontextmanager
+async def mcp_client(server: Any) -> AsyncIterator[Any]:
+    """A real MCP client session connected to an in-process server.
 
+    Uses only what mcp 1.x and 2.x share (the in-memory streams and Server.run,
+    as the Agent SDK does), never the server's internals.
+    """
+    import anyio
+    from mcp import ClientSession
+    from mcp.shared.memory import create_client_server_memory_streams
+
+    async with create_client_server_memory_streams() as (client_streams, server_streams):
+        async with anyio.create_task_group() as tasks:
+            async def serve() -> None:
+                await server.run(server_streams[0], server_streams[1], server.create_initialization_options(),
+                                 raise_exceptions=False)
+
+            tasks.start_soon(serve)
+            try:
+                async with ClientSession(client_streams[0], client_streams[1]) as session:
+                    await session.initialize()
+                    yield session
+            finally:
+                tasks.cancel_scope.cancel()
+
+
+def _field(obj: Any, *names: str) -> Any:
+    """Read a field whichever spelling this mcp version uses (inputSchema or input_schema)."""
+    for name in names:
+        if hasattr(obj, name):
+            return getattr(obj, name)
+    return None
+
+
+async def call_server_tool(server: Any, name: str, args: dict[str, Any]) -> tuple[str, bool]:
+    """Call a tool on an in-process MCP server. Returns (text, is_error)."""
+    async with mcp_client(server) as session:
+        result = await session.call_tool(name, args)
+    text = "".join(getattr(item, "text", "") for item in result.content)
+    return text, bool(_field(result, "isError", "is_error"))
+
+
+async def _list_server_tools(config: Any) -> list[dict[str, Any]] | None:
+    """Tools of an in-process SDK server, or None for an external server we won't start."""
     if not (isinstance(config, dict) and config.get("type") == "sdk"):
         return None
-    handler = config["instance"].request_handlers.get(types.ListToolsRequest)
-    if handler is None:
-        return []
-    result = await handler(types.ListToolsRequest(method="tools/list"))
-    return list(result.root.tools)
+    async with mcp_client(config["instance"]) as session:
+        listed = await session.list_tools()
+    return [{"name": t.name, "description": t.description or "",
+             "schema": _field(t, "inputSchema", "input_schema")} for t in listed.tools]
 
 
 def _smoke(server: str, fakes: list[Any], worlds: list[dict[str, Any]], result: CheckResult) -> None:
@@ -328,18 +369,18 @@ def _check_sdk(target: Any, result: CheckResult, worlds: list[dict[str, Any]]) -
                                    "pretend ones without starting it.")
         else:
             fake_listed = asyncio.run(_list_server_tools(Toolbox(fakes, FakeWorld()).sdk_server(name))) or []
-            real_by_name = {t.name: t for t in real}
-            fake_by_name = {t.name: t for t in fake_listed}
+            real_by_name = {t["name"]: t for t in real}
+            fake_by_name = {t["name"]: t for t in fake_listed}
             for tool_name in sorted(set(real_by_name) - set(fake_by_name)):
                 result.problems.append(f"{name}/{tool_name} is a real tool with no pretend version.")
             for tool_name in sorted(set(fake_by_name) - set(real_by_name)):
                 result.problems.append(f"{name}/{tool_name} is a pretend tool the real agent doesn't have.")
             for tool_name in sorted(set(real_by_name) & set(fake_by_name)):
                 r, f = real_by_name[tool_name], fake_by_name[tool_name]
-                if r.inputSchema != f.inputSchema:
+                if r["schema"] != f["schema"]:
                     result.problems.append(f"{name}/{tool_name}: the pretend input schema differs from the real one "
-                                           f"(real {json.dumps(r.inputSchema)}, pretend {json.dumps(f.inputSchema)}).")
-                if (r.description or "") != (f.description or ""):
+                                           f"(real {json.dumps(r['schema'])}, pretend {json.dumps(f['schema'])}).")
+                if r["description"] != f["description"]:
                     result.problems.append(f"{name}/{tool_name}: the pretend description differs from the real one, "
                                            "which changes how the agent uses it. Use fake_like().")
 
