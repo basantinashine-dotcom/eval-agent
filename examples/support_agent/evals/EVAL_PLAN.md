@@ -1,6 +1,6 @@
 # Test plan for pebble-support
 
-*Version 1 · Draft, not approved yet. Nothing gets built until you approve it.*
+*Version 1 · Approved on 2026-11-22.*
 
 ## 1. The short version
 
@@ -339,3 +339,4 @@ Files, side by side: `EVAL_PLAN.md`, `EVAL_PLAN.html`, and `plan.json` (every ve
 ## 13. Changes
 
 - Version 1 (2026-11-22): First version.
+- Version 1 approved on 2026-11-22.

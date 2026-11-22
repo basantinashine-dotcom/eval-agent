@@ -1799,9 +1799,17 @@
    "changes": [
     "First version."
    ]
+  },
+  {
+   "version": 1,
+   "at": "2026-11-22T04:18:58+00:00",
+   "approved": true
   }
  ],
- "approved": null,
+ "approved": {
+  "version": 1,
+  "at": "2026-11-22T04:18:58+00:00"
+ },
  "cost_usd": 0.7249,
  "history": []
 }

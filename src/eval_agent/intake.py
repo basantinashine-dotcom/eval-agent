@@ -19,7 +19,6 @@ import asyncio
 import fnmatch
 import re
 import subprocess
-import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -520,63 +519,18 @@ async def run_intake(root: Path, *, out: str = "evals", model: str = MODEL, max_
                      exclude: tuple[str, ...] = (), overwrite: bool = False, max_turns: int = 80,
                      emit: Callable[[str], None] = print, client_factory: Callable[[Any], Any] | None = None,
                      files: RepoFiles | None = None) -> tuple[IntakeResult, RepoFiles]:
-    from claude_agent_sdk import AssistantMessage, ClaudeAgentOptions, ResultMessage, TextBlock, create_sdk_mcp_server
+    from .session import run_session
 
     files = files or RepoFiles(root, out, exclude, overwrite)
     result = IntakeResult()
     spec = f"{files.out.replace('/', '.')}.target:make_target"
     tools = build_tools(files, result, spec, emit)
-    cli_output: list[str] = []
-    workdir = tempfile.mkdtemp(prefix="eval-agent-intake-")
-    options = ClaudeAgentOptions(
-        system_prompt=SYSTEM.replace("{out}", files.out),
-        model=model,
-        mcp_servers={"intake": create_sdk_mcp_server("intake", tools=tools)},
-        allowed_tools=[f"mcp__intake__{t.name}" for t in tools],
-        tools=[],                      # no built-in file or shell tools: only the narrow ones above
-        max_turns=max_turns,
-        max_budget_usd=max_cost,
-        cwd=workdir,                   # an empty folder, so nothing can touch the repo except through the tools
-        setting_sources=[],            # keep the developer's own Claude Code setup out
-        strict_mcp_config=True,
-        stderr=cli_output.append,
-    )
-    if client_factory is None:
-        from claude_agent_sdk import ClaudeSDKClient
-
-        client_factory = ClaudeSDKClient
-
-    async def turn(client: Any, prompt: str) -> None:
-        await client.query(prompt)
-        async for msg in client.receive_response():
-            if isinstance(msg, AssistantMessage):
-                text = "\n".join(b.text for b in msg.content if isinstance(b, TextBlock) and b.text.strip())
-                if text:
-                    result.final_text = text
-            elif isinstance(msg, ResultMessage):
-                if msg.total_cost_usd is not None:
-                    result.cost_usd = max(result.cost_usd, msg.total_cost_usd)
-                result.turns += msg.num_turns or 0
-                if msg.is_error:
-                    if msg.subtype == "error_max_budget_usd":
-                        result.stopped = f"It reached the cost cap (${max_cost:.2f})."
-                    elif msg.subtype == "error_max_turns":
-                        result.stopped = f"It reached the step limit ({max_turns})."
-                    else:
-                        detail = f"HTTP {msg.api_error_status}" if msg.api_error_status else msg.subtype
-                        result.stopped = f"The model call failed ({detail})."
-
-    try:
-        async with client_factory(options) as client:
-            await turn(client, _prompt(files, note))
-            if not result.stopped and result.map is None:
-                # One nudge: it sometimes ends its turn to report progress before finishing.
-                await turn(client, "You haven't finished: make check_target pass, then call submit_map.")
-    finally:
-        import shutil
-
-        shutil.rmtree(workdir, ignore_errors=True)
+    # One nudge: it sometimes ends its turn to report progress before finishing.
+    session = await run_session(
+        system=SYSTEM.replace("{out}", files.out), prompt=_prompt(files, note), server_name="intake", tools=tools,
+        model=model, max_cost=max_cost, max_turns=max_turns, client_factory=client_factory,
+        nudge=lambda: None if result.map else "You haven't finished: make check_target pass, then call submit_map.")
+    result.cost_usd, result.turns, result.final_text = session.cost_usd, session.turns, session.final_text
+    result.stopped, result.notes = session.stopped, session.notes
     result.written = sorted(files.written)
-    result.notes = [line.strip()[:300] for line in dict.fromkeys(cli_output)
-                    if line.strip() and "claude.ai connectors are disabled" not in line]
     return result, files

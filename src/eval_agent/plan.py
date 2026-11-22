@@ -61,6 +61,7 @@ class RunFacts:
     not_failures: list[str]
     cost_per_try: float | None
     seconds_per_try: float | None
+    path: str = ""               # the run's folder, so later steps can read its tries again
 
 
 @dataclass
@@ -138,7 +139,7 @@ def load_run(run_dir: Path) -> tuple[RunFacts, list[Case]]:
         reps=int(meta.get("reps") or max(tries.values(), default=1)), failures=failures, clean_cases=clean,
         not_failures=list(analysis.get("not_failures", [])),
         cost_per_try=sum(costs) / len(costs) if costs else None,
-        seconds_per_try=sum(secs) / len(secs) if secs else None)
+        seconds_per_try=sum(secs) / len(secs) if secs else None, path=str(run_dir))
     return facts, [c for c in cases if c.id in tries]
 
 

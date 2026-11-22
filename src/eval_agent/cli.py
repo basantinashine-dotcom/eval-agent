@@ -9,6 +9,8 @@
                                                   write new test cases that cover what yours miss
     eval-agent plan [--runs RUN ...]              write the eval plan; --feedback "..." revises it;
                                                   --approve approves it
+    eval-agent build                              turn the approved plan into tests, proven on earlier runs
+    eval-agent score [RUN]                        score a run with the built tests
 """
 
 from __future__ import annotations
@@ -455,6 +457,110 @@ def cmd_plan(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_build(args: argparse.Namespace) -> int:
+    from .build import MAX_JUDGE_CALLS, Builder, build_record, run_build, summary
+    from .plan import MODEL, load_state
+    from .score import JUDGE_MODEL, judge_estimate
+
+    evals = args.evals
+    state_path = evals / "plan.json"
+    if not state_path.exists():
+        print(f"There's no plan in {evals}. Write one with `eval-agent plan` and approve it first.")
+        return 1
+    state = load_state(state_path)
+    if not state.is_approved:
+        print(f"The plan in {evals} isn't approved yet (version {state.version}). Nothing gets built before that. "
+              f"Read it, then: eval-agent plan --out {evals} --approve")
+        return 1
+    existing = [f for f in ("checks.py", "expectations.json", "judges.json") if (evals / f).exists()]
+    if existing and not args.force:
+        print(f"{evals} already has {', '.join(existing)}. Use --force to build them again.")
+        return 1
+    facts = state.plan_facts()
+    run_dirs = args.runs or [Path(r.path) if r.path else Path("runs") / r.name for r in facts.runs]
+    missing = [str(r) for r in run_dirs if not (r / "analysis.json").exists()]
+    if missing:
+        print(f"Can't find these analyzed runs: {', '.join(missing)}. Pass them with --runs.")
+        return 1
+    model = args.model or MODEL
+    judge_model = args.judge_model or JUDGE_MODEL
+    builder = Builder(evals, state, run_dirs, judge_model=judge_model,
+                      emit=lambda line: print(f"  {line}", flush=True))
+    print(f"Building tests for the {len(builder.checks)} checks in plan version {state.version}, and proving them "
+          f"on the {len(builder.items)} tries we already have.")
+    print(f"Writing them with {model} stops at ${args.max_cost:.2f}. Judges use {judge_model}: at most "
+          f"{MAX_JUDGE_CALLS} questions, up to about ${judge_estimate(MAX_JUDGE_CALLS, judge_model):.2f}.")
+    for warning in auth_warnings():
+        print(f"Warning: {warning}")
+    print()
+    result = asyncio.run(run_build(builder, model=model, max_cost=args.max_cost))
+    (evals / "build.json").write_text(json.dumps(build_record(builder, result, model), indent=1, ensure_ascii=False),
+                                      encoding="utf-8")
+    print()
+    if result.stopped:
+        print(result.stopped)
+    if result.problems:
+        print("The tests can't run yet:\n" + "\n".join(f"  - {p}" for p in result.problems))
+    if result.missing:
+        print("Missing:\n" + "\n".join(f"  - {m}" for m in result.missing))
+    if result.rows:
+        print("Each test, tried on the runs we already have:")
+        print(summary(builder, result))
+    if result.notes:
+        print("\nNotes:\n" + "\n".join(f"  - {n}" for n in result.notes))
+    print(f"\nCost: ${result.cost_usd:.2f} writing the tests, ${result.judge_cost_usd:.2f} for "
+          f"{result.judge_calls} judge questions. Saved to {evals}: checks.py, expectations.json, judges.json, "
+          "build.json.")
+    print(f"\nNext: run your agent, then score the run with these tests:\n  eval-agent score RUN --evals {evals}")
+    return 0 if result.ok else 2
+
+
+def cmd_score(args: argparse.Namespace) -> int:
+    from .analyze import Spend
+    from .plan import load_state
+    from .score import JUDGE_MODEL, JudgeSpec, combine, judge_estimate, judge_jobs, load_items, score_code
+    from .score import score_judges, scores_text
+
+    run_dir = args.run or _latest_run(Path("runs"))
+    if run_dir is None or not (run_dir / "traces.jsonl").exists():
+        print("No run to score. Run `eval-agent explore` first, or pass the run's folder.")
+        return 1
+    evals = args.evals
+    if not (evals / "expectations.json").exists():
+        print(f"There are no tests in {evals} yet. Build them with `eval-agent build --evals {evals}`.")
+        return 1
+    expectations = json.loads((evals / "expectations.json").read_text(encoding="utf-8"))
+    judges = JudgeSpec.load_all(evals / "judges.json")
+    items = load_items(run_dir, str(args.cases) if args.cases else None)
+    code = score_code(evals, items, expectations)
+    if code.problems:
+        print("The tests can't run:\n" + "\n".join(f"  - {p}" for p in code.problems))
+        return 1
+    judge_model = args.judge_model or JUDGE_MODEL
+    jobs = judge_jobs(judges, items, expectations, code.results, set(code.registered))
+    estimate = judge_estimate(len(jobs), judge_model)
+    print(f"Scoring {len(items)} tries from {run_dir.name}: code checks, plus {len(jobs)} judge questions with "
+          f"{judge_model} (up to about ${estimate:.2f}).")
+    if estimate > args.max_cost:
+        print(f"That's more than --max-cost (${args.max_cost:.2f}). Raise it to go ahead.")
+        return 1
+    judged, spend = asyncio.run(score_judges(jobs, model=judge_model)) if jobs else ({}, Spend())
+    results = combine(code.results, judged)
+    state = load_state(evals / "plan.json") if (evals / "plan.json").exists() else None
+    names = {n: (c.name, c.level) for n, c in enumerate(state.plan().checks, start=1)} if state else \
+        {n: (f"check {n}", "should_usually_pass") for v in results.values() for n in v}
+    (run_dir / "scores.json").write_text(json.dumps(
+        {key: {str(n): [v.status, v.reason] for n, v in verdicts.items()} for key, verdicts in results.items()},
+        indent=1, ensure_ascii=False), encoding="utf-8")
+    report = scores_text(results, names, run_dir.name)
+    print()
+    print(report)
+    print(f"\nJudges cost ${spend.cost_usd:.2f}. Saved to {run_dir / 'scores.json'}")
+    failed_must = any(v.status == "fail" and names.get(n, ("", ""))[1] == "must_never_fail"
+                      for verdicts in results.values() for n, v in verdicts.items())
+    return 1 if failed_must else 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="eval-agent", description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -483,6 +589,23 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--model", help="Claude model to write with (default: claude-opus-5-5)")
     p.add_argument("--max-cost", type=float, default=2.0, help="stop if the estimate is above this, in $")
     p.set_defaults(func=cmd_plan)
+
+    p = sub.add_parser("build", help="turn the approved plan into tests, and prove them on earlier runs")
+    p.add_argument("--evals", type=Path, default=Path("evals"), help="where the plan is (default: evals)")
+    p.add_argument("--runs", nargs="+", type=Path, help="analyzed runs to prove the tests on (default: the plan's)")
+    p.add_argument("--model", help="Claude model that writes the tests (default: claude-opus-5-5)")
+    p.add_argument("--judge-model", help="model for judge questions (default: claude-sonnet-5-5)")
+    p.add_argument("--max-cost", type=float, default=5.0, help="stop writing at this cost, in $")
+    p.add_argument("--force", action="store_true", help="build again over existing tests")
+    p.set_defaults(func=cmd_build)
+
+    p = sub.add_parser("score", help="score a run with the built tests")
+    p.add_argument("run", nargs="?", type=Path, help="the run's folder (default: the latest in ./runs)")
+    p.add_argument("--evals", type=Path, default=Path("evals"), help="where the tests are (default: evals)")
+    p.add_argument("--cases", type=Path, help="cases file (default: the one the run used)")
+    p.add_argument("--judge-model", help="model for judge questions (default: claude-sonnet-5-5)")
+    p.add_argument("--max-cost", type=float, default=2.0, help="stop if the judge estimate is above this, in $")
+    p.set_defaults(func=cmd_score)
 
     p = sub.add_parser("cases", help="show how a golden dataset was read")
     p.add_argument("path", type=Path)

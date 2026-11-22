@@ -25,10 +25,12 @@ eval-agent plan [--runs RUN ...]
 eval-agent plan --feedback "..."
                                revise it: a new version, with what changed
 eval-agent plan --approve      approve the current version (nothing gets built before this)
+eval-agent build               turn the approved plan into tests, proven on the runs you already have
+eval-agent score [RUN]         score a run with those tests
 ```
 
-`setup`, `analyze`, `generate` and `plan` call Claude and show a cost estimate first (`--max-cost` stops
-them).
+`setup`, `analyze`, `generate`, `plan`, `build` and `score` call Claude and show a cost estimate or cap
+first (`--max-cost` stops them).
 
 - **Setup** (`eval_agent/intake.py`, `check.py`, `toolmap.py`): an agent built on the Claude Agent SDK
   reads your repo and writes `evals/target.py` and `evals/fakes.py` itself, for Claude Agent SDK agents
@@ -52,6 +54,18 @@ them).
   a yes/no judge asking "would a 15-year-old understand this check?" Anything that fails gets
   rewritten. Saved as `evals/EVAL_PLAN.md`, one self-contained `EVAL_PLAN.html` you can send to anyone,
   and `plan.json` with every version, the feedback, the changelog and your approval.
+- **Build** (`eval_agent/build.py`, `testkit.py`, `score.py`): only from an approved plan. An agent with
+  narrow tools writes the tests into `evals/`:
+  - `checks.py`: a small function for each check that a program can score;
+  - `judges.json`: a yes/no question for each check that needs judgment, asked by a different model
+    from your agent's;
+  - `expectations.json`: which checks apply to which example, taken from the example's own text,
+    never from what your agent did.
+
+  It proves the tests before handing them over. Every try the analysis found a check's problem in
+  must fail that check, and tries with nothing wrong must pass. Code checks run in a separate
+  process with the network blocked. `score` then uses the tests on any run, and fails if a "must
+  never fail" check failed.
 - **Pretend tools** (`eval_agent/fakes.py`): same names and schemas as the real ones, acting
   on a fresh world per run. They record every call and can be made to fail.
 - **Runner** (`eval_agent/runner.py`):
