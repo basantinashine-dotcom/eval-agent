@@ -139,18 +139,16 @@ def page_data(items: list[LabelItem], set_name: str, agent_name: str) -> dict[st
     return {"set": set_name, "agent": agent_name, "items": out}
 
 
-PAGE = """<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Label your agent's answers</title>
-<style>
+CSS = """
 :root{--bg:#f7f6f2;--fg:#1d1d1b;--muted:#64625b;--line:#e2dfd6;--card:#fff;--accent:#2b5d8a;--cust:#eef3f8;
---agent:#f3f1ea;--tool:#faf8f2;--err:#a33;--yes:#2e6b3a;--no:#9b2c2c}
+--agent:#f3f1ea;--tool:#faf8f2;--err:#a33;--yes:#2e6b3a;--no:#9b2c2c;--warn:#fff4d6}
 @media (prefers-color-scheme:dark){:root{--bg:#151513;--fg:#ecebe6;--muted:#a3a198;--line:#34332f;--card:#1e1e1b;
---accent:#8db8de;--cust:#1d2731;--agent:#24231f;--tool:#1b1b18;--err:#f09a9a;--yes:#9fd3a8;--no:#f0a3a3}}
+--accent:#8db8de;--cust:#1d2731;--agent:#24231f;--tool:#1b1b18;--err:#f09a9a;--yes:#9fd3a8;--no:#f0a3a3;--warn:#3a3220}}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);
 font:16px/1.55 system-ui,-apple-system,'Segoe UI',sans-serif}
 main{max-width:46rem;margin:0 auto;padding:2rem 1rem 6rem}
 h1{font-size:1.6rem;margin:0 0 .3rem}p.lead{color:var(--muted);margin:.2rem 0 1.5rem}
+.notice{background:var(--warn);border:1px solid var(--line);border-radius:10px;padding:.8rem 1rem;margin:0 0 1rem}
 .item{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:1.1rem 1.2rem;margin:1.4rem 0}
 .num{color:var(--muted);font-size:.85rem}.q{font-weight:600;font-size:1.05rem;margin:.3rem 0 .8rem}
 .ex{font-size:.9rem;color:var(--muted);margin:.2rem 0}.ex b{color:var(--fg)}
@@ -170,79 +168,103 @@ background:transparent;color:var(--fg);cursor:pointer}
 padding:.7rem 1rem;display:flex;justify-content:center;gap:1rem;align-items:center}
 .bar button{font:inherit;font-weight:600;padding:.55rem 1.3rem;border-radius:99px;border:0;background:var(--accent);
 color:var(--card);cursor:pointer}
-</style></head><body><main>
-<h1>Label your agent's answers</h1>
-<p class="lead">For each try, read what happened and answer the question yourself, the way you would if you were
-reviewing the chat. The AI judges answer the same questions; your answers show how far to trust them. You won't see
-their answers here. When you're done, click <b>Save labels</b> and put the file it saves (labels.json) in the
-<code>labels</code> folder next to this page. If you're unsure, pick "Not sure".</p>
-<div id="items"></div></main>
-<div class="bar"><span id="progress"></span><button id="save">Save labels</button></div>
-<script id="data" type="application/json">__DATA__</script>
-<script>
-const data = JSON.parse(document.getElementById('data').textContent);
-const storeKey = 'eval-agent-labels-' + data.set;
+"""
+
+# Only makes the buttons work and saves the answers; everything you read is already in the page.
+SCRIPT = """
+const SET = document.body.dataset.set;
+const storeKey = 'eval-agent-labels-' + SET;
 let answers = {};
 try { answers = JSON.parse(localStorage.getItem(storeKey) || '{}'); } catch (e) { answers = {}; }
-const el = (tag, cls, text) => { const n = document.createElement(tag); if (cls) n.className = cls;
-  if (text !== undefined) n.textContent = text; return n; };
-function render() {
-  const root = document.getElementById('items');
-  root.innerHTML = '';
-  for (const item of data.items) {
-    const card = el('section', 'item');
-    card.appendChild(el('div', 'num', 'Try ' + item.n + ' of ' + data.items.length));
-    card.appendChild(el('div', 'q', item.question));
-    const ex = el('div', 'ex'); ex.innerHTML = '<b>Done right:</b> '; ex.appendChild(document.createTextNode(item.expected || '(not written)'));
-    card.appendChild(ex);
-    if (item.must_not) { const m = el('div', 'ex'); m.innerHTML = '<b>Must not:</b> '; m.appendChild(document.createTextNode(item.must_not)); card.appendChild(m); }
-    if (item.failures.length) card.appendChild(el('div', 'ex', 'In this test, these tools were made to fail on purpose: ' + item.failures.join(', ')));
-    if (Object.keys(item.notes).length) card.appendChild(el('div', 'ex', 'Details for this example: ' + JSON.stringify(item.notes)));
-    const chat = el('div', 'chat');
-    for (const e of item.events) {
-      if (e.type === 'tool') {
-        const t = el('div', 'tool');
-        t.appendChild(document.createTextNode('Tool: ' + e.name + '(' + e.args + ')\\n'));
-        const out = el('span', e.error ? 'err' : '', (e.error ? 'ERROR: ' : '→ ') + e.output);
-        t.appendChild(out); chat.appendChild(t);
-      } else {
-        const m = el('div', 'msg ' + e.type);
-        m.appendChild(el('span', 'who', e.type === 'customer' ? 'Customer' : 'Your agent'));
-        m.appendChild(document.createTextNode(e.text)); chat.appendChild(m);
-      }
+const rows = Array.from(document.querySelectorAll('.answers'));
+function show() {
+  for (const row of rows) {
+    for (const b of row.querySelectorAll('button')) {
+      b.setAttribute('aria-pressed', answers[row.dataset.id] === b.dataset.value ? 'true' : 'false');
     }
-    card.appendChild(chat);
-    card.appendChild(el('div', 'changes', 'Changes to the pretend world: ' + (item.changes.length ? item.changes.join('; ') : 'none')));
-    const row = el('div', 'answers');
-    for (const [value, label] of [['yes', 'Yes'], ['no', 'No'], ['unsure', 'Not sure']]) {
-      const b = el('button', value, label);
-      b.setAttribute('aria-pressed', answers[item.id] === value ? 'true' : 'false');
-      b.onclick = () => { answers[item.id] = value;
-        try { localStorage.setItem(storeKey, JSON.stringify(answers)); } catch (e) {}
-        render(); };
-      row.appendChild(b);
-    }
-    card.appendChild(row);
-    root.appendChild(card);
   }
-  const done = data.items.filter(i => answers[i.id]).length;
-  document.getElementById('progress').textContent = done + ' of ' + data.items.length + ' answered';
+  const done = rows.filter(r => answers[r.dataset.id]).length;
+  document.getElementById('progress').textContent = done + ' of ' + rows.length + ' answered';
 }
-document.getElementById('save').onclick = () => {
-  const blob = new Blob([JSON.stringify({set: data.set, answers: answers}, null, 1)], {type: 'application/json'});
-  const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'labels.json';
+for (const row of rows) {
+  for (const b of row.querySelectorAll('button')) {
+    b.addEventListener('click', () => {
+      answers[row.dataset.id] = b.dataset.value;
+      try { localStorage.setItem(storeKey, JSON.stringify(answers)); } catch (e) {}
+      show();
+    });
+  }
+}
+document.getElementById('save').addEventListener('click', () => {
+  const blob = new Blob([JSON.stringify({set: SET, answers: answers}, null, 1)], {type: 'application/json'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob); a.download = 'labels.json';
   document.body.appendChild(a); a.click(); a.remove();
-};
-render();
-</script></body></html>
+});
+document.getElementById('noscript-help').hidden = true;
+document.querySelector('.bar').hidden = false;
+show();
 """
 
 
+def _esc(text: Any) -> str:
+    return html.escape(str(text), quote=True)
+
+
+def _item_html(item: dict[str, Any], total: int) -> str:
+    parts = [f'<section class="item" id="{_esc(item["id"])}">',
+             f'<div class="num">Try {item["n"]} of {total}</div>',
+             f'<div class="q">{_esc(item["question"])}</div>',
+             f'<div class="ex"><b>Done right:</b> {_esc(item["expected"] or "(not written)")}</div>']
+    if item["must_not"]:
+        parts.append(f'<div class="ex"><b>Must not:</b> {_esc(item["must_not"])}</div>')
+    if item["failures"]:
+        parts.append(f'<div class="ex">In this test, these tools were made to fail on purpose: '
+                     f'{_esc(", ".join(item["failures"]))}</div>')
+    if item["notes"]:
+        parts.append(f'<div class="ex">Details for this example: {_esc(json.dumps(item["notes"], ensure_ascii=False))}'
+                     '</div>')
+    parts.append('<div class="chat">')
+    for e in item["events"]:
+        if e["type"] == "tool":
+            result = ('<span class="err">ERROR: ' if e["error"] else '<span>&rarr; ') + _esc(e["output"]) + "</span>"
+            parts.append(f'<div class="tool">Tool: {_esc(e["name"])}({_esc(e["args"])})\n{result}</div>')
+        else:
+            who = "Customer" if e["type"] == "customer" else "Your agent"
+            parts.append(f'<div class="msg {e["type"]}"><span class="who">{who}</span>{_esc(e["text"])}</div>')
+    parts.append("</div>")
+    changes = "; ".join(item["changes"]) if item["changes"] else "none"
+    parts.append(f'<div class="changes">Changes to the pretend world: {_esc(changes)}</div>')
+    parts.append(f'<div class="answers" data-id="{_esc(item["id"])}">'
+                 '<button type="button" class="yes" data-value="yes" aria-pressed="false">Yes</button>'
+                 '<button type="button" class="no" data-value="no" aria-pressed="false">No</button>'
+                 '<button type="button" class="unsure" data-value="unsure" aria-pressed="false">Not sure</button>'
+                 "</div></section>")
+    return "\n".join(parts)
+
+
 def label_page(items: list[LabelItem], set_name: str, agent_name: str) -> str:
-    raw = json.dumps(page_data(items, set_name, agent_name), ensure_ascii=False)
-    # Whatever the agent or its tools wrote, it can't end the data's <script> or start markup of its own.
-    safe = raw.replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
-    return PAGE.replace("__DATA__", safe)
+    """One self-contained page. Every try and question is written into the HTML, so it reads anywhere;
+    the script only makes the buttons work and saves the answers."""
+    data = page_data(items, set_name, agent_name)
+    body = "\n".join(_item_html(item, len(data["items"])) for item in data["items"])
+    return f"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Label your agent's answers</title><style>{CSS}</style></head>
+<body data-set="{_esc(set_name)}"><main>
+<h1>Label your agent's answers</h1>
+<p class="lead">For each try, read what happened and answer the question yourself, the way you would if you were
+reviewing the chat. The AI judges answer the same questions; your answers show how far to trust them. You won't see
+their answers here. If you're unsure, pick "Not sure". When you're done, click <b>Save labels</b>; you can leave the
+labels.json it saves in your Downloads folder.</p>
+<div class="notice" id="noscript-help">The answer buttons need a web browser such as Chrome, Edge or Firefox. If
+they don't respond, open this file from File Explorer (double-click it), or answer in the terminal instead:
+<code>eval-agent label --terminal</code></div>
+{body}
+</main>
+<div class="bar" hidden><span id="progress"></span><button type="button" id="save">Save labels</button></div>
+<script>{SCRIPT}</script></body></html>
+"""
 
 
 def write_label_set(evals: Path, items: list[LabelItem], agent_name: str) -> tuple[str, Path]:

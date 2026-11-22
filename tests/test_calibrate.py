@@ -65,14 +65,23 @@ def test_the_page_shows_tries_but_never_the_judges_answers(tmp_path):
     _, items = picked(tmp_path)
     items[0].trace["messages"][-1]["text"] = "</script><script>alert(1)</script>"
     page = label_page(items, "abc123", "pebble-support")
-    assert page.count("<script") == 2, "agent text can't open a script of its own"
-    assert "\\u003c/script\\u003e\\u003cscript\\u003ealert(1)" in page
-    data = page.split('type="application/json">', 1)[1].split("</script>", 1)[0]
-    assert json.loads(data)["items"][0]["events"][-1]["text"] == "</script><script>alert(1)</script>", \
-        "the page still shows exactly what the agent said"
-    assert '"set": "abc123"' in page and JUDGES[0]["question"] in page
+    assert page.count("<script") == 1, "agent text can't open a script of its own"
+    assert "&lt;/script&gt;&lt;script&gt;alert(1)&lt;/script&gt;" in page, "shown as text, exactly as written"
+    assert 'data-set="abc123"' in page
     assert "fail_when" not in page and "Judge:" not in page
     assert "https://" not in page and "http://" not in page and "<link" not in page
+
+
+def test_the_page_reads_without_scripts(tmp_path):
+    """Previews that don't run scripts still show every try, its question and the chat."""
+    _, items = picked(tmp_path)
+    page = label_page(items, "abc123", "pebble-support")
+    readable = page.split("<script>", 1)[0]
+    assert readable.count('<section class="item"') == 3
+    assert readable.count(JUDGES[0]["question"]) == 3
+    assert '<span class="who">Customer</span>Refund order 4471' in readable
+    assert "Tool: issue_refund(order_id=&quot;4471&quot;)" in readable
+    assert 'id="noscript-help"' in readable and '<div class="bar" hidden>' in readable
 
 
 def test_label_sets_save_and_labels_are_found(tmp_path):
