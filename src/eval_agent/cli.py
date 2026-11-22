@@ -7,6 +7,8 @@
     eval-agent analyze [RUN]                      find what went wrong and group it into failure types
     eval-agent generate --target MOD:FN --cases PATH
                                                   write new test cases that cover what yours miss
+    eval-agent plan [--runs RUN ...]              write the eval plan; --feedback "..." revises it;
+                                                  --approve approves it
 """
 
 from __future__ import annotations
@@ -321,6 +323,138 @@ def cmd_setup(args: argparse.Namespace) -> int:
     return 0 if smoke is None or smoke.ok else 2
 
 
+def _latest_analyzed_run(runs_dir: Path) -> Path | None:
+    runs = sorted(p for p in runs_dir.glob("*") if (p / "analysis.json").exists()) if runs_dir.is_dir() else []
+    return runs[-1] if runs else None
+
+
+def _print_plan_check(state) -> None:
+    report = state.check_report()
+    print(f"Plan check: reading grade {report.grade:g} (target 9 or below). A 15-year-old judge understood "
+          f"{report.understood} of {report.judged} checks.")
+    if report.issues:
+        print(f"Still flagged after {report.rounds} rewrites ({len(report.issues)}):")
+        for issue in report.issues[:8]:
+            print(f"  - {issue}")
+
+
+def cmd_plan(args: argparse.Namespace) -> int:
+    from .plan import (
+        LEVEL_LABEL,
+        MODEL,
+        add_revision,
+        approve,
+        estimate_cost,
+        gather_facts,
+        load_state,
+        new_state,
+        revise_plan,
+        save_state,
+        write_plan,
+    )
+    from .plan_render import markdown, to_html
+
+    out = args.out
+    state_path = out / "plan.json"
+    model = args.model or MODEL
+
+    def save(state) -> None:
+        save_state(state, state_path)
+        (out / "EVAL_PLAN.md").write_text(markdown(state), encoding="utf-8")
+        (out / "EVAL_PLAN.html").write_text(to_html(state), encoding="utf-8")
+
+    def files() -> str:
+        return f"{out / 'EVAL_PLAN.md'} (and EVAL_PLAN.html, one file you can send to anyone)"
+
+    next_steps = (f"\nRead it, then either:\n  eval-agent plan --out {out} --approve\n"
+                  f"  eval-agent plan --out {out} --feedback \"what's missing or wrong\"")
+
+    if args.approve or args.feedback:
+        if not state_path.exists():
+            print(f"There's no plan in {out} yet. Run `eval-agent plan` first.")
+            return 1
+        state = load_state(state_path)
+
+    if args.approve:
+        if state.is_approved:
+            print(f"Version {state.version} is already approved.")
+            return 0
+        approve(state)
+        save(state)
+        print(f"Approved version {state.version} of the plan. It's recorded in {state_path}, and the next step "
+              "builds the tests from exactly this version.")
+        return 0
+
+    if args.feedback:
+        facts = state.plan_facts()
+        estimate = estimate_cost(facts, model, revising=True)
+        print(f"Revising the plan with {model}. Estimated cost: up to ${estimate:.2f}.")
+        if estimate > args.max_cost:
+            print(f"That's more than --max-cost (${args.max_cost:.2f}). Raise it to go ahead.")
+            return 1
+        was_approved = state.is_approved
+        result = asyncio.run(revise_plan(facts, state.plan(), args.feedback, model=model))
+        add_revision(state, args.feedback, result)
+        save(state)
+        print(f"\nVersion {state.version}.")
+        if result.reply:
+            print(f"\n{result.reply}")
+        print("\nWhat changed:")
+        for change in result.what_changed:
+            print(f"  - {change}")
+        print()
+        _print_plan_check(state)
+        if was_approved:
+            print(f"\nYou had approved version {state.version - 1}; approve this version when it's right.")
+        print(f"\nCost: ${result.spend.cost_usd:.2f}. Saved to {files()}.{next_steps}")
+        return 0
+
+    if state_path.exists() and not args.new:
+        state = load_state(state_path)
+        print(f"There's already a plan in {out} (version {state.version}). Give feedback with --feedback, approve "
+              "it with --approve, or start over with --new.")
+        return 1
+    run_dirs = args.runs or [r for r in [_latest_analyzed_run(Path("runs"))] if r]
+    if not run_dirs:
+        print("No analyzed runs to plan from. Run `eval-agent explore`, then `eval-agent analyze`, first.")
+        return 1
+    meta_path = run_dirs[0] / "run.json"
+    meta = json.loads(meta_path.read_text(encoding="utf-8")) if meta_path.exists() else {}
+    target_spec = args.target or meta.get("target") or ""
+    target = load_target(target_spec) if target_spec else None
+    tool_map_path = args.tool_map or out / "tool_map.yaml"
+    tool_map = None
+    if tool_map_path.exists():
+        import yaml
+
+        tool_map = yaml.safe_load(tool_map_path.read_text(encoding="utf-8"))
+    try:
+        facts = gather_facts(run_dirs, target_spec=target_spec, target=target, tool_map=tool_map)
+    except FileNotFoundError as exc:
+        print(exc)
+        return 1
+    estimate = estimate_cost(facts, model)
+    runs_text = ", ".join(r.name for r in facts.runs)
+    print(f"Writing a test plan for {facts.agent_name} from {len(facts.runs)} analyzed run(s) ({runs_text}) and "
+          f"{len(facts.cases)} examples, with {model}. Estimated cost: up to ${estimate:.2f}.")
+    if tool_map is None:
+        print(f"(No tool map at {tool_map_path}; I'll use the tools as the target describes them.)")
+    if estimate > args.max_cost:
+        print(f"That's more than --max-cost (${args.max_cost:.2f}). Raise it to go ahead.")
+        return 1
+    result = asyncio.run(write_plan(facts, model=model))
+    state = new_state(facts, result)
+    save(state)
+    draft = state.plan()
+    print(f"\n{draft.short_version}\n\nChecks:")
+    for n, check in enumerate(draft.checks, start=1):
+        print(f"  {n}. {check.name} ({LEVEL_LABEL[check.level]})")
+    print()
+    _print_plan_check(state)
+    print(f"\nCost: ${result.spend.cost_usd:.2f}. Saved to {files()}.{next_steps}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="eval-agent", description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -337,6 +471,18 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--no-smoke", action="store_true", help="don't run the agent once at the end")
     p.add_argument("--timeout", type=float, default=300, help="seconds for that first run")
     p.set_defaults(func=cmd_setup)
+
+    p = sub.add_parser("plan", help="write the eval plan in plain words; revise it on feedback; approve it")
+    p.add_argument("--runs", nargs="+", type=Path, help="analyzed run folders to plan from (default: the latest)")
+    p.add_argument("--target", help="module.path:function (default: the one the first run used)")
+    p.add_argument("--tool-map", type=Path, help="the setup step's tool map (default: OUT/tool_map.yaml)")
+    p.add_argument("--out", type=Path, default=Path("evals"), help="where the plan lives (default: evals)")
+    p.add_argument("--feedback", help="what's missing or wrong; writes a new version")
+    p.add_argument("--approve", action="store_true", help="approve the current version")
+    p.add_argument("--new", action="store_true", help="start a new plan even if one exists")
+    p.add_argument("--model", help="Claude model to write with (default: claude-opus-5-5)")
+    p.add_argument("--max-cost", type=float, default=2.0, help="stop if the estimate is above this, in $")
+    p.set_defaults(func=cmd_plan)
 
     p = sub.add_parser("cases", help="show how a golden dataset was read")
     p.add_argument("path", type=Path)

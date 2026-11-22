@@ -20,9 +20,15 @@ eval-agent explore --target module:function --cases PATH [--reps 3]
 eval-agent analyze [RUN]       find what went wrong and group it into failure types, in plain words
 eval-agent generate --target module:function --cases PATH
                                write new test cases that cover what yours miss (into added/)
+eval-agent plan [--runs RUN ...]
+                               write the eval plan in plain words, from your analyzed runs
+eval-agent plan --feedback "..."
+                               revise it: a new version, with what changed
+eval-agent plan --approve      approve the current version (nothing gets built before this)
 ```
 
-`setup`, `analyze` and `generate` call Claude and show a cost estimate first (`--max-cost` stops them).
+`setup`, `analyze`, `generate` and `plan` call Claude and show a cost estimate first (`--max-cost` stops
+them).
 
 - **Setup** (`eval_agent/intake.py`, `check.py`, `toolmap.py`): an agent built on the Claude Agent SDK
   reads your repo and writes `evals/target.py` and `evals/fakes.py` itself, for Claude Agent SDK agents
@@ -38,6 +44,14 @@ eval-agent generate --target module:function --cases PATH
 
   Tried on a copy of the sample agent (without its answer key) and on the Threads reply agent (custom
   code): both passed their checks on the first try, for $0.13 and $0.59.
+- **Eval plan** (`eval_agent/plan.py`, `plan_render.py`, `readability.py`): turns what the runs showed
+  into a plan in 13 parts, from "the short version" to "words you might not know". Each check says
+  what it tests, why it matters, what happened with your agent, and how it's tested. Claude writes the
+  words; code fills in the counts, tools, examples, cost and time, so those are exact. Before you see
+  it, the plan is checked: reading level (grade 9 or below), long sentences, jargon and code words, and
+  a yes/no judge asking "would a 15-year-old understand this check?" Anything that fails gets
+  rewritten. Saved as `evals/EVAL_PLAN.md`, one self-contained `EVAL_PLAN.html` you can send to anyone,
+  and `plan.json` with every version, the feedback, the changelog and your approval.
 - **Pretend tools** (`eval_agent/fakes.py`): same names and schemas as the real ones, acting
   on a fresh world per run. They record every call and can be made to fail.
 - **Runner** (`eval_agent/runner.py`):
@@ -55,6 +69,9 @@ eval-agent generate --target module:function --cases PATH
   email and delete-account tools, 10 test cases plus 10 generated ones, and planted bugs for the
   eval to find. Without seeing the answer key, the analyzer found the delete-without-asking bug
   (5 of 6 delete runs) and, on generated cases, a refund confirmed after the refund tool failed.
+  Its plan, [`examples/support_agent/evals/EVAL_PLAN.md`](examples/support_agent/evals/EVAL_PLAN.md),
+  has 14 checks covering all five planted bugs, including two that never happened in testing. It
+  reads at grade 6.6, and the 15-year-old judge understood every check. Writing it cost $0.72.
 - **Custom-code example:** the Threads reply agent's `evals/target.py` (in the
   `marketingagentthreads` repo) runs its real drafter and policy with posting faked.
 

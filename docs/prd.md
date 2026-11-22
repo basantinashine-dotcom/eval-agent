@@ -391,6 +391,7 @@ to write code.
 evals/
   EVAL_PLAN.md        the approved plan, with changelog
   EVAL_PLAN.html      the same plan as one file to send to anyone
+  plan.json           every version of the plan, the feedback, the changelog and the approval
   tool_map.yaml       tools, risky or not, faked or patched
   target.py           how to run your agent with the pretend tools
   fakes.py            pretend versions of its tools (including MCP tools)
