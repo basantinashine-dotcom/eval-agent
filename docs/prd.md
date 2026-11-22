@@ -392,7 +392,8 @@ evals/
   EVAL_PLAN.md        the approved plan, with changelog
   EVAL_PLAN.html      the same plan as one file to send to anyone
   tool_map.yaml       tools, risky or not, faked or patched
-  fakes/              pretend versions of risky tools (including MCP tools)
+  target.py           how to run your agent with the pretend tools
+  fakes.py            pretend versions of its tools (including MCP tools)
   cases/golden/       your dataset, untouched
   cases/added/        generated cases, tagged synthetic
   checks/             code checks
