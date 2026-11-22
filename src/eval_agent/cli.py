@@ -7,6 +7,11 @@
     eval-agent analyze [RUN]                      find what went wrong and group it into failure types
     eval-agent generate --target MOD:FN --cases PATH
                                                   write new test cases that cover what yours miss
+    eval-agent plan [--runs RUN ...]              write the eval plan; --feedback "..." revises it;
+                                                  --approve approves it
+    eval-agent build                              turn the approved plan into tests, proven on earlier runs
+    eval-agent score [RUN]                        score a run with the built tests
+    eval-agent mutate                             break a copy of the agent on purpose; see if the tests notice
 """
 
 from __future__ import annotations
@@ -321,6 +326,355 @@ def cmd_setup(args: argparse.Namespace) -> int:
     return 0 if smoke is None or smoke.ok else 2
 
 
+def _latest_analyzed_run(runs_dir: Path) -> Path | None:
+    runs = sorted(p for p in runs_dir.glob("*") if (p / "analysis.json").exists()) if runs_dir.is_dir() else []
+    return runs[-1] if runs else None
+
+
+def _print_plan_check(state) -> None:
+    report = state.check_report()
+    print(f"Plan check: reading grade {report.grade:g} (target 9 or below). A 15-year-old judge understood "
+          f"{report.understood} of {report.judged} checks.")
+    if report.issues:
+        print(f"Still flagged after {report.rounds} rewrites ({len(report.issues)}):")
+        for issue in report.issues[:8]:
+            print(f"  - {issue}")
+
+
+def cmd_plan(args: argparse.Namespace) -> int:
+    from .plan import (
+        LEVEL_LABEL,
+        MODEL,
+        add_revision,
+        approve,
+        estimate_cost,
+        gather_facts,
+        load_state,
+        new_state,
+        revise_plan,
+        save_state,
+        write_plan,
+    )
+    from .plan_render import markdown, to_html
+
+    out = args.out
+    state_path = out / "plan.json"
+    model = args.model or MODEL
+
+    def save(state) -> None:
+        save_state(state, state_path)
+        (out / "EVAL_PLAN.md").write_text(markdown(state), encoding="utf-8")
+        (out / "EVAL_PLAN.html").write_text(to_html(state), encoding="utf-8")
+
+    def files() -> str:
+        return f"{out / 'EVAL_PLAN.md'} (and EVAL_PLAN.html, one file you can send to anyone)"
+
+    next_steps = (f"\nRead it, then either:\n  eval-agent plan --out {out} --approve\n"
+                  f"  eval-agent plan --out {out} --feedback \"what's missing or wrong\"")
+
+    if args.approve or args.feedback:
+        if not state_path.exists():
+            print(f"There's no plan in {out} yet. Run `eval-agent plan` first.")
+            return 1
+        state = load_state(state_path)
+
+    if args.approve:
+        if state.is_approved:
+            print(f"Version {state.version} is already approved.")
+            return 0
+        approve(state)
+        save(state)
+        print(f"Approved version {state.version} of the plan. It's recorded in {state_path}, and the next step "
+              "builds the tests from exactly this version.")
+        return 0
+
+    if args.feedback:
+        facts = state.plan_facts()
+        estimate = estimate_cost(facts, model, revising=True)
+        print(f"Revising the plan with {model}. Estimated cost: up to ${estimate:.2f}.")
+        if estimate > args.max_cost:
+            print(f"That's more than --max-cost (${args.max_cost:.2f}). Raise it to go ahead.")
+            return 1
+        was_approved = state.is_approved
+        result = asyncio.run(revise_plan(facts, state.plan(), args.feedback, model=model))
+        add_revision(state, args.feedback, result)
+        save(state)
+        print(f"\nVersion {state.version}.")
+        if result.reply:
+            print(f"\n{result.reply}")
+        print("\nWhat changed:")
+        for change in result.what_changed:
+            print(f"  - {change}")
+        print()
+        _print_plan_check(state)
+        if was_approved:
+            print(f"\nYou had approved version {state.version - 1}; approve this version when it's right.")
+        print(f"\nCost: ${result.spend.cost_usd:.2f}. Saved to {files()}.{next_steps}")
+        return 0
+
+    if state_path.exists() and not args.new:
+        state = load_state(state_path)
+        print(f"There's already a plan in {out} (version {state.version}). Give feedback with --feedback, approve "
+              "it with --approve, or start over with --new.")
+        return 1
+    run_dirs = args.runs or [r for r in [_latest_analyzed_run(Path("runs"))] if r]
+    if not run_dirs:
+        print("No analyzed runs to plan from. Run `eval-agent explore`, then `eval-agent analyze`, first.")
+        return 1
+    meta_path = run_dirs[0] / "run.json"
+    meta = json.loads(meta_path.read_text(encoding="utf-8")) if meta_path.exists() else {}
+    target_spec = args.target or meta.get("target") or ""
+    target = load_target(target_spec) if target_spec else None
+    tool_map_path = args.tool_map or out / "tool_map.yaml"
+    tool_map = None
+    if tool_map_path.exists():
+        import yaml
+
+        tool_map = yaml.safe_load(tool_map_path.read_text(encoding="utf-8"))
+    try:
+        facts = gather_facts(run_dirs, target_spec=target_spec, target=target, tool_map=tool_map)
+    except FileNotFoundError as exc:
+        print(exc)
+        return 1
+    estimate = estimate_cost(facts, model)
+    runs_text = ", ".join(r.name for r in facts.runs)
+    print(f"Writing a test plan for {facts.agent_name} from {len(facts.runs)} analyzed run(s) ({runs_text}) and "
+          f"{len(facts.cases)} examples, with {model}. Estimated cost: up to ${estimate:.2f}.")
+    if tool_map is None:
+        print(f"(No tool map at {tool_map_path}; I'll use the tools as the target describes them.)")
+    if estimate > args.max_cost:
+        print(f"That's more than --max-cost (${args.max_cost:.2f}). Raise it to go ahead.")
+        return 1
+    result = asyncio.run(write_plan(facts, model=model))
+    state = new_state(facts, result)
+    save(state)
+    draft = state.plan()
+    print(f"\n{draft.short_version}\n\nChecks:")
+    for n, check in enumerate(draft.checks, start=1):
+        print(f"  {n}. {check.name} ({LEVEL_LABEL[check.level]})")
+    print()
+    _print_plan_check(state)
+    print(f"\nCost: ${result.spend.cost_usd:.2f}. Saved to {files()}.{next_steps}")
+    return 0
+
+
+def cmd_build(args: argparse.Namespace) -> int:
+    from .build import MAX_JUDGE_CALLS, Builder, build_record, run_build, summary
+    from .plan import MODEL, load_state
+    from .score import JUDGE_MODEL, judge_estimate
+
+    evals = args.evals
+    state_path = evals / "plan.json"
+    if not state_path.exists():
+        print(f"There's no plan in {evals}. Write one with `eval-agent plan` and approve it first.")
+        return 1
+    state = load_state(state_path)
+    if not state.is_approved:
+        print(f"The plan in {evals} isn't approved yet (version {state.version}). Nothing gets built before that. "
+              f"Read it, then: eval-agent plan --out {evals} --approve")
+        return 1
+    existing = [f for f in ("checks.py", "expectations.json", "judges.json") if (evals / f).exists()]
+    if existing and not args.force:
+        print(f"{evals} already has {', '.join(existing)}. Use --force to build them again.")
+        return 1
+    facts = state.plan_facts()
+    run_dirs = args.runs or [Path(r.path) if r.path else Path("runs") / r.name for r in facts.runs]
+    missing = [str(r) for r in run_dirs if not (r / "analysis.json").exists()]
+    if missing:
+        print(f"Can't find these analyzed runs: {', '.join(missing)}. Pass them with --runs.")
+        return 1
+    model = args.model or MODEL
+    judge_model = args.judge_model or JUDGE_MODEL
+    builder = Builder(evals, state, run_dirs, judge_model=judge_model,
+                      emit=lambda line: print(f"  {line}", flush=True))
+    print(f"Building tests for the {len(builder.checks)} checks in plan version {state.version}, and proving them "
+          f"on the {len(builder.items)} tries we already have.")
+    print(f"Writing them with {model} stops at ${args.max_cost:.2f}. Judges use {judge_model}: at most "
+          f"{MAX_JUDGE_CALLS} questions, up to about ${judge_estimate(MAX_JUDGE_CALLS, judge_model):.2f}.")
+    for warning in auth_warnings():
+        print(f"Warning: {warning}")
+    print()
+    result = asyncio.run(run_build(builder, model=model, max_cost=args.max_cost))
+    (evals / "build.json").write_text(json.dumps(build_record(builder, result, model), indent=1, ensure_ascii=False),
+                                      encoding="utf-8")
+    print()
+    if result.stopped:
+        print(result.stopped)
+    if result.problems:
+        print("The tests can't run yet:\n" + "\n".join(f"  - {p}" for p in result.problems))
+    if result.missing:
+        print("Missing:\n" + "\n".join(f"  - {m}" for m in result.missing))
+    if result.rows:
+        print("Each test, tried on the runs we already have:")
+        print(summary(builder, result))
+    if result.notes:
+        print("\nNotes:\n" + "\n".join(f"  - {n}" for n in result.notes))
+    print(f"\nCost: ${result.cost_usd:.2f} writing the tests, ${result.judge_cost_usd:.2f} for "
+          f"{result.judge_calls} judge questions. Saved to {evals}: checks.py, expectations.json, judges.json, "
+          "build.json.")
+    print(f"\nNext: run your agent, then score the run with these tests:\n  eval-agent score RUN --evals {evals}")
+    return 0 if result.ok else 2
+
+
+def cmd_score(args: argparse.Namespace) -> int:
+    from .analyze import Spend
+    from .plan import load_state
+    from .score import JUDGE_MODEL, JudgeSpec, combine, judge_estimate, judge_jobs, load_items, score_code
+    from .score import score_judges, scores_text
+
+    run_dir = args.run or _latest_run(Path("runs"))
+    if run_dir is None or not (run_dir / "traces.jsonl").exists():
+        print("No run to score. Run `eval-agent explore` first, or pass the run's folder.")
+        return 1
+    evals = args.evals
+    if not (evals / "expectations.json").exists():
+        print(f"There are no tests in {evals} yet. Build them with `eval-agent build --evals {evals}`.")
+        return 1
+    expectations = json.loads((evals / "expectations.json").read_text(encoding="utf-8"))
+    judges = JudgeSpec.load_all(evals / "judges.json")
+    items = load_items(run_dir, str(args.cases) if args.cases else None)
+    code = score_code(evals, items, expectations)
+    if code.problems:
+        print("The tests can't run:\n" + "\n".join(f"  - {p}" for p in code.problems))
+        return 1
+    judge_model = args.judge_model or JUDGE_MODEL
+    jobs = judge_jobs(judges, items, expectations, code.results, set(code.registered))
+    estimate = judge_estimate(len(jobs), judge_model)
+    print(f"Scoring {len(items)} tries from {run_dir.name}: code checks, plus {len(jobs)} judge questions with "
+          f"{judge_model} (up to about ${estimate:.2f}).")
+    if estimate > args.max_cost:
+        print(f"That's more than --max-cost (${args.max_cost:.2f}). Raise it to go ahead.")
+        return 1
+    judged, spend = asyncio.run(score_judges(jobs, model=judge_model)) if jobs else ({}, Spend())
+    results = combine(code.results, judged)
+    state = load_state(evals / "plan.json") if (evals / "plan.json").exists() else None
+    names = {n: (c.name, c.level) for n, c in enumerate(state.plan().checks, start=1)} if state else \
+        {n: (f"check {n}", "should_usually_pass") for v in results.values() for n in v}
+    (run_dir / "scores.json").write_text(json.dumps(
+        {key: {str(n): [v.status, v.reason] for n, v in verdicts.items()} for key, verdicts in results.items()},
+        indent=1, ensure_ascii=False), encoding="utf-8")
+    report = scores_text(results, names, run_dir.name)
+    print()
+    print(report)
+    print(f"\nJudges cost ${spend.cost_usd:.2f}. Saved to {run_dir / 'scores.json'}")
+    failed_must = any(v.status == "fail" and names.get(n, ("", ""))[1] == "must_never_fail"
+                      for verdicts in results.values() for n, v in verdicts.items())
+    return 1 if failed_must else 0
+
+
+def cmd_mutate(args: argparse.Namespace) -> int:
+    from .dataset import Case
+    from .mutate import (
+        MutationPlan,
+        design,
+        estimate,
+        from_record,
+        judges_per_try,
+        record,
+        report,
+        run_mutations,
+        strengthen,
+    )
+    from .plan import MODEL, load_state
+    from .score import JUDGE_MODEL, JudgeSpec
+
+    evals = args.evals
+    if not (evals / "plan.json").exists() or not (evals / "expectations.json").exists():
+        print(f"There are no built tests in {evals}. Run `eval-agent build --evals {evals}` first.")
+        return 1
+    state = load_state(evals / "plan.json")
+    if not state.is_approved:
+        print(f"The plan in {evals} isn't approved, so its tests aren't final. Approve it and build first.")
+        return 1
+    facts = state.plan_facts()
+    checks = state.plan().checks
+    names = {n: c.name for n, c in enumerate(checks, start=1)}
+    must = {n for n, c in enumerate(checks, start=1) if c.level == "must_never_fail"}
+    saved = evals / "mutations.json"
+    if args.report_only:
+        data = json.loads(saved.read_text(encoding="utf-8")) if saved.exists() else {}
+        if not data.get("results"):
+            print(f"There are no saved breaks in {evals} to report. Run `eval-agent mutate` first.")
+            return 1
+        plan, run = from_record(data)
+        saved.write_text(json.dumps(record(run, plan), indent=1, ensure_ascii=False), encoding="utf-8")
+        print(report(run, names, must))
+        return 2 if any(r.verdict == "weak" for r in run.results) else 0
+    target_spec = args.target or facts.target
+    if not target_spec:
+        print("I don't know how to run your agent. Pass --target module.path:function.")
+        return 1
+    target = load_target(target_spec)
+    expectations = json.loads((evals / "expectations.json").read_text(encoding="utf-8"))
+    judges = JudgeSpec.load_all(evals / "judges.json")
+    cases = {c["id"]: Case(**c) for c in facts.cases}
+    build = json.loads((evals / "build.json").read_text(encoding="utf-8")) if (evals / "build.json").exists() else {}
+    unproven = sorted(row["check"] for row in build.get("checks", []) if not row.get("known_bad") and
+                      row["check"] in must)
+    baseline_runs = args.runs or [Path(r.path) if r.path else Path("runs") / r.name for r in facts.runs]
+    model = args.model or MODEL
+    judge_model = args.judge_model or JUDGE_MODEL
+
+    design_cost = 0.0
+    reused = saved.exists() and not args.redesign
+    if reused:
+        plan = MutationPlan(mutations=json.loads(saved.read_text(encoding="utf-8"))["mutations"], notes=[])
+        print(f"Using the {len(plan.mutations)} breaks in {saved} (--redesign to write new ones).")
+    else:
+        print(f"Designing breaks from the plan's list with {model}, plus one for each must-never-fail test that has "
+              f"never seen a failure ({len(unproven)}).")
+        plan, spend = asyncio.run(design(state, target, expectations, unproven, model=model))
+        design_cost = spend.cost_usd
+    if args.only:
+        wanted = {i.strip() for i in args.only.split(",")}
+        plan.mutations = [m for m in plan.mutations if m.id in wanted]
+    cost = estimate(plan, reps=args.reps, max_cases=args.max_cases, agent_cost_per_try=facts.cost_per_try(),
+                    judges_per_try=judges_per_try(plan, judges), judge_model=judge_model)
+    tries = sum(min(len(m.cases), args.max_cases) for m in plan.mutations) * args.reps
+    print(f"{len(plan.mutations)} breaks, {tries} tries of your agent in all. Estimated cost: up to ${cost:.2f} "
+          "(your agent's model calls plus judges).")
+    if cost > args.max_cost:
+        print(f"That's more than --max-cost (${args.max_cost:.2f}). Raise it, or use --only or --max-cases.")
+        return 1
+    for warning in auth_warnings() if isinstance(target, SdkTarget) else []:
+        print(f"Warning: {warning}")
+    print()
+    stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
+    out_dir = args.out / f"mutations-{stamp}"
+    run = asyncio.run(run_mutations(
+        plan, target=target, evals=evals, cases=cases, expectations=expectations, judges=judges,
+        baseline_runs=baseline_runs, check_numbers=set(names), reps=args.reps, max_cases=args.max_cases,
+        judge_model=judge_model, out_dir=out_dir, emit=lambda line: print(f"  {line}", flush=True)))
+    resisted = [r for r in run.results if r.verdict == "resisted"]
+    if resisted and not reused and not args.no_retry:
+        print(f"\n  Your agent resisted {len(resisted)} breaks; designing a stronger try at each.")
+        stronger, spend = asyncio.run(strengthen(state, target, expectations, resisted, model=model))
+        design_cost += spend.cost_usd
+        more = estimate(stronger, reps=args.reps, max_cases=args.max_cases, agent_cost_per_try=facts.cost_per_try(),
+                        judges_per_try=judges_per_try(stronger, judges), judge_model=judge_model)
+        spent = design_cost + run.agent_cost_usd + run.judge_cost_usd
+        if spent + more > args.max_cost:
+            print(f"  Skipping them: they'd take the total past --max-cost (${args.max_cost:.2f}).")
+        else:
+            again = asyncio.run(run_mutations(
+                stronger, target=target, evals=evals, cases=cases, expectations=expectations, judges=judges,
+                baseline_runs=baseline_runs, check_numbers=set(names), reps=args.reps, max_cases=args.max_cases,
+                judge_model=judge_model, out_dir=out_dir, emit=lambda line: print(f"  {line}", flush=True)))
+            run.results += again.results
+            run.skipped += again.skipped
+            run.agent_cost_usd += again.agent_cost_usd
+            run.judge_cost_usd += again.judge_cost_usd
+            plan.mutations += stronger.mutations
+    run.design_cost_usd = round(design_cost, 4)
+    saved.write_text(json.dumps(record(run, plan), indent=1, ensure_ascii=False), encoding="utf-8")
+    print()
+    print(report(run, names, must))
+    print(f"\nCost: ${design_cost:.2f} designing, ${run.agent_cost_usd:.2f} for your agent, ${run.judge_cost_usd:.2f} "
+          f"for judges. Saved to {saved}; the broken runs are in {out_dir}.")
+    weak = any(r.verdict == "weak" for r in run.results)
+    return 2 if weak else 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="eval-agent", description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -337,6 +691,51 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--no-smoke", action="store_true", help="don't run the agent once at the end")
     p.add_argument("--timeout", type=float, default=300, help="seconds for that first run")
     p.set_defaults(func=cmd_setup)
+
+    p = sub.add_parser("plan", help="write the eval plan in plain words; revise it on feedback; approve it")
+    p.add_argument("--runs", nargs="+", type=Path, help="analyzed run folders to plan from (default: the latest)")
+    p.add_argument("--target", help="module.path:function (default: the one the first run used)")
+    p.add_argument("--tool-map", type=Path, help="the setup step's tool map (default: OUT/tool_map.yaml)")
+    p.add_argument("--out", type=Path, default=Path("evals"), help="where the plan lives (default: evals)")
+    p.add_argument("--feedback", help="what's missing or wrong; writes a new version")
+    p.add_argument("--approve", action="store_true", help="approve the current version")
+    p.add_argument("--new", action="store_true", help="start a new plan even if one exists")
+    p.add_argument("--model", help="Claude model to write with (default: claude-opus-5-5)")
+    p.add_argument("--max-cost", type=float, default=2.0, help="stop if the estimate is above this, in $")
+    p.set_defaults(func=cmd_plan)
+
+    p = sub.add_parser("build", help="turn the approved plan into tests, and prove them on earlier runs")
+    p.add_argument("--evals", type=Path, default=Path("evals"), help="where the plan is (default: evals)")
+    p.add_argument("--runs", nargs="+", type=Path, help="analyzed runs to prove the tests on (default: the plan's)")
+    p.add_argument("--model", help="Claude model that writes the tests (default: claude-opus-5-5)")
+    p.add_argument("--judge-model", help="model for judge questions (default: claude-sonnet-5-5)")
+    p.add_argument("--max-cost", type=float, default=5.0, help="stop writing at this cost, in $")
+    p.add_argument("--force", action="store_true", help="build again over existing tests")
+    p.set_defaults(func=cmd_build)
+
+    p = sub.add_parser("score", help="score a run with the built tests")
+    p.add_argument("run", nargs="?", type=Path, help="the run's folder (default: the latest in ./runs)")
+    p.add_argument("--evals", type=Path, default=Path("evals"), help="where the tests are (default: evals)")
+    p.add_argument("--cases", type=Path, help="cases file (default: the one the run used)")
+    p.add_argument("--judge-model", help="model for judge questions (default: claude-sonnet-5-5)")
+    p.add_argument("--max-cost", type=float, default=2.0, help="stop if the judge estimate is above this, in $")
+    p.set_defaults(func=cmd_score)
+
+    p = sub.add_parser("mutate", help="break a copy of the agent on purpose and see if the tests notice")
+    p.add_argument("--evals", type=Path, default=Path("evals"), help="where the built tests are (default: evals)")
+    p.add_argument("--target", help="module.path:function (default: the plan's)")
+    p.add_argument("--runs", nargs="+", type=Path, help="earlier runs to compare with (default: the plan's)")
+    p.add_argument("--only", help="comma-separated break ids to run")
+    p.add_argument("--redesign", action="store_true", help="write new breaks instead of reusing saved ones")
+    p.add_argument("--no-retry", action="store_true", help="don't make a stronger try at breaks your agent resisted")
+    p.add_argument("--report-only", action="store_true", help="report the saved breaks again; run nothing")
+    p.add_argument("--reps", type=int, default=1, help="tries per example per break")
+    p.add_argument("--max-cases", type=int, default=4, help="examples per break, at most")
+    p.add_argument("--model", help="Claude model that designs the breaks (default: claude-opus-5-5)")
+    p.add_argument("--judge-model", help="model for judge questions (default: claude-sonnet-5-5)")
+    p.add_argument("--max-cost", type=float, default=3.0, help="stop if the estimate is above this, in $")
+    p.add_argument("--out", type=Path, default=Path("runs"), help="where to save the broken runs")
+    p.set_defaults(func=cmd_mutate)
 
     p = sub.add_parser("cases", help="show how a golden dataset was read")
     p.add_argument("path", type=Path)
