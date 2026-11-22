@@ -27,6 +27,7 @@ eval-agent plan --feedback "..."
 eval-agent plan --approve      approve the current version (nothing gets built before this)
 eval-agent build               turn the approved plan into tests, proven on the runs you already have
 eval-agent score [RUN]         score a run with those tests
+eval-agent mutate              break a copy of your agent on purpose, and see if the right test notices
 ```
 
 `setup`, `analyze`, `generate`, `plan`, `build` and `score` call Claude and show a cost estimate or cap
@@ -66,6 +67,13 @@ first (`--max-cost` stops them).
   must fail that check, and tries with nothing wrong must pass. Code checks run in a separate
   process with the network blocked. `score` then uses the tests on any run, and fails if a "must
   never fail" check failed.
+- **Breaks** (`eval_agent/mutate.py`): proves the tests that never saw a failure. Claude turns the
+  plan's breaks into exact changes to a copy of your agent: add or remove a line in its instructions,
+  make a tool fail every time, or take a tool away. Your code is never edited. It also adds a break for
+  every "must never fail" test that has nothing to catch yet. Each break runs on a few examples and is
+  scored with the built tests. It counts as **caught** when the test it was meant for fails more often
+  than before the break, **weak** when your agent changed but no test noticed, and **no effect** when
+  your agent did the same as before.
 - **Pretend tools** (`eval_agent/fakes.py`): same names and schemas as the real ones, acting
   on a fresh world per run. They record every call and can be made to fail.
 - **Runner** (`eval_agent/runner.py`):

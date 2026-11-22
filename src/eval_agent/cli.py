@@ -11,6 +11,7 @@
                                                   --approve approves it
     eval-agent build                              turn the approved plan into tests, proven on earlier runs
     eval-agent score [RUN]                        score a run with the built tests
+    eval-agent mutate                             break a copy of the agent on purpose; see if the tests notice
 """
 
 from __future__ import annotations
@@ -561,6 +562,119 @@ def cmd_score(args: argparse.Namespace) -> int:
     return 1 if failed_must else 0
 
 
+def cmd_mutate(args: argparse.Namespace) -> int:
+    from .dataset import Case
+    from .mutate import (
+        MutationPlan,
+        design,
+        estimate,
+        from_record,
+        judges_per_try,
+        record,
+        report,
+        run_mutations,
+        strengthen,
+    )
+    from .plan import MODEL, load_state
+    from .score import JUDGE_MODEL, JudgeSpec
+
+    evals = args.evals
+    if not (evals / "plan.json").exists() or not (evals / "expectations.json").exists():
+        print(f"There are no built tests in {evals}. Run `eval-agent build --evals {evals}` first.")
+        return 1
+    state = load_state(evals / "plan.json")
+    if not state.is_approved:
+        print(f"The plan in {evals} isn't approved, so its tests aren't final. Approve it and build first.")
+        return 1
+    facts = state.plan_facts()
+    checks = state.plan().checks
+    names = {n: c.name for n, c in enumerate(checks, start=1)}
+    must = {n for n, c in enumerate(checks, start=1) if c.level == "must_never_fail"}
+    saved = evals / "mutations.json"
+    if args.report_only:
+        data = json.loads(saved.read_text(encoding="utf-8")) if saved.exists() else {}
+        if not data.get("results"):
+            print(f"There are no saved breaks in {evals} to report. Run `eval-agent mutate` first.")
+            return 1
+        plan, run = from_record(data)
+        saved.write_text(json.dumps(record(run, plan), indent=1, ensure_ascii=False), encoding="utf-8")
+        print(report(run, names, must))
+        return 2 if any(r.verdict == "weak" for r in run.results) else 0
+    target_spec = args.target or facts.target
+    if not target_spec:
+        print("I don't know how to run your agent. Pass --target module.path:function.")
+        return 1
+    target = load_target(target_spec)
+    expectations = json.loads((evals / "expectations.json").read_text(encoding="utf-8"))
+    judges = JudgeSpec.load_all(evals / "judges.json")
+    cases = {c["id"]: Case(**c) for c in facts.cases}
+    build = json.loads((evals / "build.json").read_text(encoding="utf-8")) if (evals / "build.json").exists() else {}
+    unproven = sorted(row["check"] for row in build.get("checks", []) if not row.get("known_bad") and
+                      row["check"] in must)
+    baseline_runs = args.runs or [Path(r.path) if r.path else Path("runs") / r.name for r in facts.runs]
+    model = args.model or MODEL
+    judge_model = args.judge_model or JUDGE_MODEL
+
+    design_cost = 0.0
+    reused = saved.exists() and not args.redesign
+    if reused:
+        plan = MutationPlan(mutations=json.loads(saved.read_text(encoding="utf-8"))["mutations"], notes=[])
+        print(f"Using the {len(plan.mutations)} breaks in {saved} (--redesign to write new ones).")
+    else:
+        print(f"Designing breaks from the plan's list with {model}, plus one for each must-never-fail test that has "
+              f"never seen a failure ({len(unproven)}).")
+        plan, spend = asyncio.run(design(state, target, expectations, unproven, model=model))
+        design_cost = spend.cost_usd
+    if args.only:
+        wanted = {i.strip() for i in args.only.split(",")}
+        plan.mutations = [m for m in plan.mutations if m.id in wanted]
+    cost = estimate(plan, reps=args.reps, max_cases=args.max_cases, agent_cost_per_try=facts.cost_per_try(),
+                    judges_per_try=judges_per_try(plan, judges), judge_model=judge_model)
+    tries = sum(min(len(m.cases), args.max_cases) for m in plan.mutations) * args.reps
+    print(f"{len(plan.mutations)} breaks, {tries} tries of your agent in all. Estimated cost: up to ${cost:.2f} "
+          "(your agent's model calls plus judges).")
+    if cost > args.max_cost:
+        print(f"That's more than --max-cost (${args.max_cost:.2f}). Raise it, or use --only or --max-cases.")
+        return 1
+    for warning in auth_warnings() if isinstance(target, SdkTarget) else []:
+        print(f"Warning: {warning}")
+    print()
+    stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
+    out_dir = args.out / f"mutations-{stamp}"
+    run = asyncio.run(run_mutations(
+        plan, target=target, evals=evals, cases=cases, expectations=expectations, judges=judges,
+        baseline_runs=baseline_runs, check_numbers=set(names), reps=args.reps, max_cases=args.max_cases,
+        judge_model=judge_model, out_dir=out_dir, emit=lambda line: print(f"  {line}", flush=True)))
+    resisted = [r for r in run.results if r.verdict == "resisted"]
+    if resisted and not reused and not args.no_retry:
+        print(f"\n  Your agent resisted {len(resisted)} breaks; designing a stronger try at each.")
+        stronger, spend = asyncio.run(strengthen(state, target, expectations, resisted, model=model))
+        design_cost += spend.cost_usd
+        more = estimate(stronger, reps=args.reps, max_cases=args.max_cases, agent_cost_per_try=facts.cost_per_try(),
+                        judges_per_try=judges_per_try(stronger, judges), judge_model=judge_model)
+        spent = design_cost + run.agent_cost_usd + run.judge_cost_usd
+        if spent + more > args.max_cost:
+            print(f"  Skipping them: they'd take the total past --max-cost (${args.max_cost:.2f}).")
+        else:
+            again = asyncio.run(run_mutations(
+                stronger, target=target, evals=evals, cases=cases, expectations=expectations, judges=judges,
+                baseline_runs=baseline_runs, check_numbers=set(names), reps=args.reps, max_cases=args.max_cases,
+                judge_model=judge_model, out_dir=out_dir, emit=lambda line: print(f"  {line}", flush=True)))
+            run.results += again.results
+            run.skipped += again.skipped
+            run.agent_cost_usd += again.agent_cost_usd
+            run.judge_cost_usd += again.judge_cost_usd
+            plan.mutations += stronger.mutations
+    run.design_cost_usd = round(design_cost, 4)
+    saved.write_text(json.dumps(record(run, plan), indent=1, ensure_ascii=False), encoding="utf-8")
+    print()
+    print(report(run, names, must))
+    print(f"\nCost: ${design_cost:.2f} designing, ${run.agent_cost_usd:.2f} for your agent, ${run.judge_cost_usd:.2f} "
+          f"for judges. Saved to {saved}; the broken runs are in {out_dir}.")
+    weak = any(r.verdict == "weak" for r in run.results)
+    return 2 if weak else 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="eval-agent", description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -606,6 +720,22 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--judge-model", help="model for judge questions (default: claude-sonnet-5-5)")
     p.add_argument("--max-cost", type=float, default=2.0, help="stop if the judge estimate is above this, in $")
     p.set_defaults(func=cmd_score)
+
+    p = sub.add_parser("mutate", help="break a copy of the agent on purpose and see if the tests notice")
+    p.add_argument("--evals", type=Path, default=Path("evals"), help="where the built tests are (default: evals)")
+    p.add_argument("--target", help="module.path:function (default: the plan's)")
+    p.add_argument("--runs", nargs="+", type=Path, help="earlier runs to compare with (default: the plan's)")
+    p.add_argument("--only", help="comma-separated break ids to run")
+    p.add_argument("--redesign", action="store_true", help="write new breaks instead of reusing saved ones")
+    p.add_argument("--no-retry", action="store_true", help="don't make a stronger try at breaks your agent resisted")
+    p.add_argument("--report-only", action="store_true", help="report the saved breaks again; run nothing")
+    p.add_argument("--reps", type=int, default=1, help="tries per example per break")
+    p.add_argument("--max-cases", type=int, default=4, help="examples per break, at most")
+    p.add_argument("--model", help="Claude model that designs the breaks (default: claude-opus-5-5)")
+    p.add_argument("--judge-model", help="model for judge questions (default: claude-sonnet-5-5)")
+    p.add_argument("--max-cost", type=float, default=3.0, help="stop if the estimate is above this, in $")
+    p.add_argument("--out", type=Path, default=Path("runs"), help="where to save the broken runs")
+    p.set_defaults(func=cmd_mutate)
 
     p = sub.add_parser("cases", help="show how a golden dataset was read")
     p.add_argument("path", type=Path)
