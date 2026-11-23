@@ -4,7 +4,9 @@ from types import SimpleNamespace
 from eval_agent import calibrate as calibrate_mod
 from eval_agent.calibrate import (
     JudgeAgreement,
+    archive_label_set,
     calibrate,
+    labeled_before,
     find_labels,
     label_in_terminal,
     label_page,
@@ -139,6 +141,33 @@ async def test_unsure_labels_and_changed_questions_are_left_out(tmp_path):
     assert results[2].labeled == 0 and judge.calls == 0
 
 
+async def test_a_recheck_uses_answers_given_to_an_older_wording(tmp_path):
+    _, items = picked(tmp_path)
+    answers = {i.id: "yes" for i in items}
+    reworded = JudgeSpec(2, JUDGES[0]["question"] + " Count 'started' as worked.", "yes")
+    client, judge = fake_client()
+    skipped, _ = await calibrate(items, answers, [reworded], client=client)
+    assert skipped[2].labeled == 0, "a normal check leaves out answers to an older wording"
+    rechecked, _ = await calibrate(items, answers, [reworded], client=client, allow_revised=True)
+    assert rechecked[2].labeled == 3 and judge.calls == 3
+
+
+def test_a_fresh_round_asks_about_tries_not_labeled_before(tmp_path):
+    evals, first = picked(tmp_path)
+    name, _ = write_label_set(evals, first, "pebble-support")
+    (evals / "labels" / "labels.json").write_text(json.dumps({"set": name, "answers": {}}), encoding="utf-8")
+    archived, asked = archive_label_set(evals)
+    assert archived == evals / "labels" / f"round-{name}"
+    assert (archived / "labels.json").exists() and not (evals / "labels" / "items.json").exists()
+    assert labeled_before(evals) == asked == {(i.check, i.key) for i in first}
+    run = tmp_path / "runs" / "r1"
+    cases = {c.id: c for c in CASES}
+    fresh = pick_items(evals, run_dirs=[run], extra=mutation_items(tmp_path / "runs", cases), cases=cases,
+                       checks_based_on=BASED_ON, seed=1, exclude=asked)
+    assert fresh and not {(i.check, i.key) for i in fresh} & asked
+    assert len(fresh) == 2, "5 tries fit the question; 3 were asked before"
+
+
 def test_trust_follows_labels_question_and_model(tmp_path):
     evals = tmp_path / "evals"
     evals.mkdir()
@@ -154,6 +183,9 @@ def test_trust_follows_labels_question_and_model(tmp_path):
     save_calibration(evals, {2: JudgeAgreement(2, question_hash(spec), labeled=4, agreed=3)}, "claude-sonnet-5-5",
                      "set1")
     assert trust(evals, [spec], "claude-sonnet-5-5")[2] == (False, "its judge agreed with you only 3 of 4 times")
+    save_calibration(evals, {2: JudgeAgreement(2, question_hash(spec))}, "claude-sonnet-5-5", "set1")
+    assert trust(evals, [spec], "claude-sonnet-5-5")[2] == (False, "its judge hasn't been checked against your "
+                                                                   "labels yet"), "no labels isn't 0 of 0"
 
 
 def test_an_untrusted_judge_flags_but_cant_fail_a_must_never_fail_check():
@@ -194,3 +226,16 @@ def test_label_and_calibrate_commands(tmp_path, monkeypatch, capsys):
     assert "agreed with you 3 of 3 times, so trusted." in out
     saved = json.loads((evals / "calibration.json").read_text(encoding="utf-8"))
     assert saved["checks"]["2"]["trusted"] is True and saved["label_set"] == name
+
+    (evals / "calibration.json").unlink()
+    assert main(["calibrate", "--evals", str(evals), "--recheck"]) == 0
+    out = capsys.readouterr().out
+    assert "It doesn't make a judge trusted" in out and "Nothing saved: trust stays as it was." in out
+    assert not (evals / "calibration.json").exists()
+
+    assert main(["label", "--evals", str(evals), "--runs", str(run), "--runs-dir", str(tmp_path / "runs"),
+                 "--fresh"]) == 0
+    out = capsys.readouterr().out
+    assert "A fresh round: 2 tries you haven't labeled for these questions." in out
+    assert f"Your earlier round is kept in {evals / 'labels' / f'round-{name}'}" in out
+    assert load_label_set(evals)[0] != name

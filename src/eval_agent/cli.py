@@ -691,7 +691,15 @@ def _built(evals: Path):
 
 
 def cmd_label(args: argparse.Namespace) -> int:
-    from .calibrate import label_in_terminal, load_label_set, mutation_items, pick_items, write_label_set
+    from .calibrate import (
+        archive_label_set,
+        label_in_terminal,
+        labeled_before,
+        load_label_set,
+        mutation_items,
+        pick_items,
+        write_label_set,
+    )
     from .dataset import Case
     from .score import JudgeSpec
 
@@ -703,21 +711,33 @@ def cmd_label(args: argparse.Namespace) -> int:
         print("Your tests have no judges, so there's nothing to label.")
         return 1
     facts = state.plan_facts()
-    if (evals / "labels" / "items.json").exists() and not args.new:
+    if (evals / "labels" / "items.json").exists() and not (args.new or args.fresh):
         name, items = load_label_set(evals)
         page = evals / "labels" / "label.html"
-        print(f"Using the label set you already have ({len(items)} tries; --new to pick new ones).")
+        print(f"Using the label set you already have ({len(items)} tries; --fresh for a new round).")
     else:
+        archived = None
+        if args.fresh:
+            archived, _ = archive_label_set(evals)
+        exclude = labeled_before(evals)
         cases = {c["id"]: Case(**c) for c in facts.cases}
         run_dirs = args.runs or [Path(r.path) if r.path else Path("runs") / r.name for r in facts.runs]
         extra = mutation_items(args.runs_dir, cases)
         checks = state.plan().checks
         items = pick_items(evals, run_dirs=run_dirs, extra=extra, cases=cases,
                            checks_based_on={n: c.based_on for n, c in enumerate(checks, start=1)},
-                           per_judge=args.per_judge)
+                           per_judge=args.per_judge, seed=len(list((evals / "labels").glob("round-*"))),
+                           exclude=exclude)
+        if not items:
+            print("There are no tries left that you haven't labeled. Run your agent on more examples first.")
+            return 1
         name, page = write_label_set(evals, items, facts.agent_name)
-        print(f"I picked {len(items)} tries for you to label: up to {args.per_judge} for each judge question, "
-              "mixing ones that went wrong before, ones from breaking your agent, and ordinary ones.")
+        if exclude:
+            print(f"A fresh round: {len(items)} tries you haven't labeled for these questions."
+                  + (f" Your earlier round is kept in {archived}." if archived else ""))
+        else:
+            print(f"I picked {len(items)} tries for you to label: up to {args.per_judge} for each judge question, "
+                  "mixing ones that went wrong before, ones from breaking your agent, and ordinary ones.")
     if args.terminal:
         answers = label_in_terminal(items)
         (evals / "labels" / "labels.json").write_text(json.dumps({"set": name, "answers": answers}, indent=1),
@@ -761,11 +781,19 @@ def cmd_calibrate(args: argparse.Namespace) -> int:
         print(f"That's more than --max-cost (${args.max_cost:.2f}). Raise it to go ahead.")
         return 1
     judges = JudgeSpec.load_all(evals / "judges.json")
-    results, spend = asyncio.run(calibrate(items, answers, judges, model=judge_model))
-    save_calibration(evals, results, judge_model, name)
     names = {n: (c.name, c.level) for n, c in enumerate(state.plan().checks, start=1)}
+    if args.recheck:
+        print("Re-checking the current judge questions on the answers you already gave. If you rewrote a question to "
+              "match how you answered, this shows whether it now says what you meant. It doesn't make a judge "
+              "trusted, because these are the answers it was rewritten from: label a fresh round for that "
+              "(eval-agent label --fresh).")
+    results, spend = asyncio.run(calibrate(items, answers, judges, model=judge_model, allow_revised=args.recheck))
     print()
     print(report(results, names))
+    if args.recheck:
+        print(f"\nCost: ${spend.cost_usd:.2f}. Nothing saved: trust stays as it was.")
+        return 0
+    save_calibration(evals, results, judge_model, name)
     print(f"\nCost: ${spend.cost_usd:.2f}. Saved to {evals / 'calibration.json'}; `eval-agent score` uses it from now on.")
     return 0
 
@@ -838,7 +866,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--runs-dir", type=Path, default=Path("runs"), help="where break runs are (default: runs)")
     p.add_argument("--per-judge", type=int, default=3, help="tries per judge question")
     p.add_argument("--terminal", action="store_true", help="answer in the terminal instead of a web page")
-    p.add_argument("--new", action="store_true", help="pick a new set of tries")
+    p.add_argument("--new", action="store_true", help="pick the set again (replaces the current one)")
+    p.add_argument("--fresh", action="store_true", help="a new round of tries you haven't labeled; keeps the old one")
     p.set_defaults(func=cmd_label)
 
     p = sub.add_parser("calibrate", help="see how often each judge agrees with your labels")
@@ -846,6 +875,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--labels", type=Path, help="your labels.json (default: the labels folder, then Downloads)")
     p.add_argument("--judge-model", help="model for judge questions (default: claude-sonnet-5-5)")
     p.add_argument("--max-cost", type=float, default=1.0, help="stop if the estimate is above this, in $")
+    p.add_argument("--recheck", action="store_true", help="try rewritten questions on the answers you gave; "
+                   "reports only, never makes a judge trusted")
     p.set_defaults(func=cmd_calibrate)
 
     p = sub.add_parser("cases", help="show how a golden dataset was read")

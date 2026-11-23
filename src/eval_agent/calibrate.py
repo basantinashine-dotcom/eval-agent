@@ -62,8 +62,13 @@ def mutation_items(runs_dir: Path, cases: dict[str, Case]) -> list[Item]:
 
 
 def pick_items(evals: Path, *, run_dirs: list[Path], extra: list[Item], cases: dict[str, Case],
-               checks_based_on: dict[int, list[str]], per_judge: int = PER_JUDGE, seed: int = 0) -> list[LabelItem]:
-    """About `per_judge` tries for each judge question, from different kinds of tries, in shuffled order."""
+               checks_based_on: dict[int, list[str]], per_judge: int = PER_JUDGE, seed: int = 0,
+               exclude: set[tuple[int, str]] | None = None) -> list[LabelItem]:
+    """About `per_judge` tries for each judge question, from different kinds of tries, in shuffled order.
+
+    exclude: (check, try) pairs already labeled, so a fresh round asks about tries the owner hasn't seen.
+    """
+    exclude = exclude or set()
     expectations = json.loads((evals / "expectations.json").read_text(encoding="utf-8"))
     judges = JudgeSpec.load_all(evals / "judges.json")
     items = [i for run_dir in run_dirs for i in load_items(run_dir)] + extra
@@ -79,7 +84,7 @@ def pick_items(evals: Path, *, run_dirs: list[Path], extra: list[Item], cases: d
                                                                  "ordinary": []}
         for item in items:
             applies = expectations_for(expectations, item.trace.case_id)
-            if str(spec.check) not in applies:
+            if str(spec.check) not in applies or (spec.check, item.key) in exclude:
                 continue
             if spec.check in code.registered:
                 verdict = code.results.get(item.key, {}).get(spec.check)
@@ -279,6 +284,29 @@ def write_label_set(evals: Path, items: list[LabelItem], agent_name: str) -> tup
     return name, page
 
 
+def archive_label_set(evals: Path) -> tuple[Path | None, set[tuple[int, str]]]:
+    """Move the current round (items, page, labels) into labels/round-<set>/. Returns it and what it asked about."""
+    folder = evals / "labels"
+    if not (folder / "items.json").exists():
+        return None, set()
+    name, items = load_label_set(evals)
+    target = folder / f"round-{name}"
+    target.mkdir(parents=True, exist_ok=True)
+    for file in ("items.json", "label.html", "labels.json"):
+        if (folder / file).exists():
+            (folder / file).replace(target / file)
+    return target, {(i.check, i.key) for i in items}
+
+
+def labeled_before(evals: Path) -> set[tuple[int, str]]:
+    """Every (check, try) asked about in earlier rounds."""
+    seen = set()
+    for path in (evals / "labels").glob("round-*/items.json"):
+        for item in json.loads(path.read_text(encoding="utf-8"))["items"]:
+            seen.add((item["check"], item["key"]))
+    return seen
+
+
 def load_label_set(evals: Path) -> tuple[str, list[LabelItem]]:
     data = json.loads((evals / "labels" / "items.json").read_text(encoding="utf-8"))
     return data["set"], [LabelItem(**i) for i in data["items"]]
@@ -342,8 +370,13 @@ class JudgeAgreement:
 
 
 async def calibrate(items: list[LabelItem], answers: dict[str, str], judges: list[JudgeSpec], *,
-                    model: str = JUDGE_MODEL, client: Any = None) -> tuple[dict[int, JudgeAgreement], Spend]:
-    """Ask each judge its question on the labeled tries and count agreement with the owner."""
+                    model: str = JUDGE_MODEL, client: Any = None,
+                    allow_revised: bool = False) -> tuple[dict[int, JudgeAgreement], Spend]:
+    """Ask each judge its question on the labeled tries and count agreement with the owner.
+
+    Labels given to an older wording of a question are left out, unless allow_revised (a re-check
+    after rewriting a question to match how the owner answered; it never earns trust).
+    """
     own = client is None
     if own:
         import anthropic
@@ -357,7 +390,7 @@ async def calibrate(items: list[LabelItem], answers: dict[str, str], judges: lis
     async def one(item: LabelItem) -> None:
         spec = specs.get(item.check)
         answer = answers.get(item.id)
-        if spec is None or answer not in ("yes", "no") or spec.question != item.question:
+        if spec is None or answer not in ("yes", "no") or (spec.question != item.question and not allow_revised):
             return
         trace = Trace.from_dict(item.trace)
         case = Case(**item.case) if item.case else None
@@ -397,7 +430,7 @@ def trust(evals: Path, judges: list[JudgeSpec], judge_model: str) -> dict[int, t
     out = {}
     for spec in judges:
         row = (saved.get("checks") or {}).get(str(spec.check))
-        if not row:
+        if not row or not row.get("labeled"):
             out[spec.check] = (False, "its judge hasn't been checked against your labels yet")
         elif row.get("question_hash") != question_hash(spec):
             out[spec.check] = (False, "its judge's question changed since you labeled, so it needs checking again")

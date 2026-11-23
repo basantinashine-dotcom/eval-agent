@@ -82,7 +82,10 @@ first (`--max-cost` stops them).
   without seeing the judge's answers, and save `labels.json`. `calibrate` asks the judges the same
   questions and counts how often each agrees with you. A judge that agrees at least 9 times in 10 is
   trusted. One that isn't (or was never checked, or whose question changed) can still flag a problem,
-  but `score` won't let it fail a "must never fail" check.
+  but `score` won't let it fail a "must never fail" check. After rewriting a judge's question to match
+  how you answered, `calibrate --recheck` shows whether it now says what you meant. It never grants
+  trust, because those are the answers the question was rewritten from. `label --fresh` starts a new
+  round with tries you haven't labeled, and keeps the old round.
 - **Pretend tools** (`eval_agent/fakes.py`): same names and schemas as the real ones, acting
   on a fresh world per run. They record every call and can be made to fail.
 - **Runner** (`eval_agent/runner.py`):
