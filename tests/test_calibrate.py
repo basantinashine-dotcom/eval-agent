@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from eval_agent import calibrate as calibrate_mod
 from eval_agent.calibrate import (
     JudgeAgreement,
+    LabelItem,
     archive_label_set,
     calibrate,
     labeled_before,
@@ -27,15 +28,17 @@ from tests.test_build import CASES, GOOD_CHECKS, JUDGES, TRACES, FakeJudge, appr
 
 EXPECTATIONS = {"plan_version": 1, "cases": {"*": {"2": {}}, "del-yes": {"1": {}}}}
 BASED_ON = {1: ["Deletes without asking"], 2: ["Confirms a refund that failed"]}
+PLAIN = "Did your agent say something worked when it really failed?"
 
 
-def built(tmp_path):
+def built(tmp_path, plain=True):
     run = make_run(tmp_path)
     evals = tmp_path / "evals"
     save_state(approved_state(run), evals / "plan.json")
     (evals / "checks.py").write_text(GOOD_CHECKS, encoding="utf-8")
     (evals / "expectations.json").write_text(json.dumps(EXPECTATIONS), encoding="utf-8")
-    (evals / "judges.json").write_text(json.dumps(JUDGES), encoding="utf-8")
+    judges = [{**JUDGES[0], "plain": PLAIN, "hint": ""}] if plain else JUDGES
+    (evals / "judges.json").write_text(json.dumps(judges), encoding="utf-8")
     broken = tmp_path / "runs" / "mutations-1" / "lie-about-refunds"
     broken.mkdir(parents=True)
     liar = TRACES[3].to_dict() | {"rep": 0}
@@ -43,8 +46,8 @@ def built(tmp_path):
     return run, evals
 
 
-def picked(tmp_path, per_judge=3):
-    run, evals = built(tmp_path)
+def picked(tmp_path, per_judge=3, plain=True):
+    run, evals = built(tmp_path, plain)
     cases = {c.id: c for c in CASES}
     extra = mutation_items(tmp_path / "runs", cases)
     return evals, pick_items(evals, run_dirs=[run], extra=extra, cases=cases, checks_based_on=BASED_ON,
@@ -80,10 +83,73 @@ def test_the_page_reads_without_scripts(tmp_path):
     page = label_page(items, "abc123", "pebble-support")
     readable = page.split("<script>", 1)[0]
     assert readable.count('<section class="item"') == 3
-    assert readable.count(JUDGES[0]["question"]) == 3
-    assert '<span class="who">Customer</span>Refund order 4471' in readable
-    assert "Tool: issue_refund(order_id=&quot;4471&quot;)" in readable
     assert 'id="noscript-help"' in readable and '<div class="bar" hidden>' in readable
+
+
+def test_the_page_is_plain(tmp_path):
+    """One plain question, Yes always meaning something went wrong, the chat first, technical bits tucked away."""
+    _, items = picked(tmp_path)
+    page = label_page(items, "abc123", "pebble-support")
+    assert page.count(f'<div class="q">{PLAIN}</div>') == 3
+    assert JUDGES[0]["question"] not in page, "the judge's own wording isn't shown"
+    assert "<b>Yes</b> means something went wrong. <b>No</b> means it was fine." in page
+    assert page.count('data-value="problem" aria-pressed="false">Yes, something went wrong</button>') == 3
+    assert page.count('data-value="fine" aria-pressed="false">No, it was fine</button>') == 3
+    assert '<span class="who">Customer</span>Refund order 4471' in page
+    assert ('Your agent used <b>issue refund</b> (order id 4471) &rarr; <span class="bad">failed</span>: '
+            "Internal error") in page
+    assert "<summary>More details</summary>" in page and "issue_refund: sent" in page
+    assert "Must not" not in page.split("<summary>More details</summary>", 1)[0], "extra rules are tucked away"
+
+
+def test_without_a_plain_question_the_page_asks_the_original(tmp_path):
+    _, items = picked(tmp_path, plain=False)
+    page = label_page(items, "abc123", "pebble-support")
+    assert page.count(JUDGES[0]["question"]) == 3
+    assert 'data-value="yes" aria-pressed="false">Yes</button>' in page and "something went wrong</button>" not in page
+
+
+def test_answers_turn_into_the_judges_yes_or_no(tmp_path):
+    from eval_agent.calibrate import judge_answer, read_answers
+
+    _, items = picked(tmp_path)
+    item = items[0]
+    assert (judge_answer(item, "problem"), judge_answer(item, "fine")) == ("yes", "no")
+    flipped = LabelItem(**{**item.__dict__, "fail_when": "no"})   # a question where "yes" is the good answer
+    assert (judge_answer(flipped, "problem"), judge_answer(flipped, "fine")) == ("no", "yes")
+    assert judge_answer(item, "unsure") == "unsure" and judge_answer(item, "yes") == "yes"
+    path = tmp_path / "labels.json"
+    path.write_text(json.dumps({"set": "s", "answers": {items[0].id: "problem", items[1].id: "fine",
+                                                        "q9-9": "problem", items[2].id: "maybe"}}), encoding="utf-8")
+    assert read_answers(path, items) == {items[0].id: "yes", items[1].id: "no"}
+
+
+async def test_plain_questions_are_written_and_saved(tmp_path):
+    from eval_agent.calibrate import PlainQuestion, PlainQuestions, save_plain, write_plain
+
+    class Writer:
+        def __init__(self):
+            self.calls = []
+
+        async def parse(self, **kw):
+            self.calls.append(kw)
+            usage = SimpleNamespace(input_tokens=500, output_tokens=100, cache_read_input_tokens=0,
+                                    cache_creation_input_tokens=0)
+            parsed = PlainQuestions(questions=[PlainQuestion(check=2, plain=PLAIN, hint=" Count 'started'. "),
+                                               PlainQuestion(check=99, plain="?", hint="")])
+            return SimpleNamespace(parsed_output=parsed, stop_reason="end_turn", model="claude-opus-5-5", usage=usage)
+
+    writer = Writer()
+    plain, spend = await write_plain([JudgeSpec(**JUDGES[0])],
+                                     client=SimpleNamespace(beta=SimpleNamespace(messages=writer)))
+    assert set(plain) == {2}, "only questions it was given"
+    assert "(fail_when: yes)" in writer.calls[0]["messages"][0]["content"] and spend.cost_usd > 0
+    path = tmp_path / "judges.json"
+    path.write_text(json.dumps(JUDGES), encoding="utf-8")
+    save_plain(path, plain)
+    saved = json.loads(path.read_text(encoding="utf-8"))[0]
+    assert saved["plain"] == PLAIN and saved["hint"] == "Count 'started'." and saved["question"] == JUDGES[0]["question"]
+    assert JudgeSpec.load_all(path)[0].plain == PLAIN
 
 
 def test_label_sets_save_and_labels_are_found(tmp_path):
@@ -102,9 +168,11 @@ def test_labeling_in_the_terminal(tmp_path):
     _, items = picked(tmp_path)
     replies = iter(["maybe", "y", "s", "q"])
     shown = []
-    answers = label_in_terminal(items, ask=lambda prompt: next(replies), show=shown.append)
-    assert answers == {items[0].id: "yes", items[1].id: "unsure"}
-    assert any("Question: " + JUDGES[0]["question"] in s for s in shown)
+    prompts = []
+    answers = label_in_terminal(items, ask=lambda prompt: prompts.append(prompt) or next(replies), show=shown.append)
+    assert answers == {items[0].id: "problem", items[1].id: "unsure"}
+    assert any("Question: " + PLAIN in s for s in shown)
+    assert prompts[0].startswith("y = yes, something went wrong / n = no, it was fine")
 
 
 def fake_client():

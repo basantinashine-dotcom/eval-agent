@@ -140,13 +140,16 @@ class JudgeSpec:
     check: int
     question: str
     fail_when: str   # "yes" or "no"
+    plain: str = ""  # the same question for a person, in everyday words; "yes" always means something went wrong
+    hint: str = ""   # one short sentence on what counts, for that person
 
     @classmethod
     def load_all(cls, path: Path) -> list[JudgeSpec]:
         if not path.exists():
             return []
         raw = json.loads(path.read_text(encoding="utf-8"))
-        return [cls(int(j["check"]), str(j["question"]), str(j.get("fail_when", "yes")).lower()) for j in raw]
+        return [cls(int(j["check"]), str(j["question"]), str(j.get("fail_when", "yes")).lower(),
+                    str(j.get("plain", "")), str(j.get("hint", ""))) for j in raw]
 
 
 async def judge_one(client: Any, model: str, spec: JudgeSpec, item: Item, expect: dict[str, Any],

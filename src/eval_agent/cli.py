@@ -698,7 +698,9 @@ def cmd_label(args: argparse.Namespace) -> int:
         load_label_set,
         mutation_items,
         pick_items,
+        save_plain,
         write_label_set,
+        write_plain,
     )
     from .dataset import Case
     from .score import JudgeSpec
@@ -720,6 +722,12 @@ def cmd_label(args: argparse.Namespace) -> int:
         if args.fresh:
             archived, _ = archive_label_set(evals)
         exclude = labeled_before(evals)
+        missing = [j for j in JudgeSpec.load_all(evals / "judges.json") if not j.plain]
+        if missing:
+            print(f"Writing a short, plain version of {len(missing)} judge questions, so \"yes\" always means "
+                  "something went wrong (a few cents). They're saved in judges.json for you to read or edit.")
+            plain, _ = asyncio.run(write_plain(missing))
+            save_plain(evals / "judges.json", plain)
         cases = {c["id"]: Case(**c) for c in facts.cases}
         run_dirs = args.runs or [Path(r.path) if r.path else Path("runs") / r.name for r in facts.runs]
         extra = mutation_items(args.runs_dir, cases)
@@ -744,11 +752,10 @@ def cmd_label(args: argparse.Namespace) -> int:
                                                       encoding="utf-8")
         print(f"\nSaved {len(answers)} answers. Next: eval-agent calibrate --evals {evals}")
         return 0
-    print(f"\nOpen this page in your browser and answer each question:\n  {page.resolve()}\n"
-          "Click Save labels when you're done. Put labels.json in the same folder as the page, or leave it in "
-          "Downloads; I'll look in both.\n"
+    print(f"\nOpen this page in your browser:\n  {page.resolve()}\n"
+          "Answer each question, then click Save my answers. You can leave the file in Downloads.\n"
           f"Then: eval-agent calibrate --evals {evals}\n"
-          "(Prefer the terminal? eval-agent label --terminal)")
+          "(Or answer in the terminal: eval-agent label --terminal)")
     return 0
 
 
@@ -769,7 +776,7 @@ def cmd_calibrate(args: argparse.Namespace) -> int:
         print(f"I couldn't find your labels.json for this set ({name}). I looked in {evals / 'labels'} and in "
               "Downloads. Pass it with --labels PATH.")
         return 1
-    answers = read_answers(path)
+    answers = read_answers(path, items)
     usable = [i for i in items if answers.get(i.id) in ("yes", "no")]
     print(f"Read {len(answers)} answers from {path} ({len(usable)} yes or no; 'not sure' ones are left out).")
     if not usable:
