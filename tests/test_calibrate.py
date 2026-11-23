@@ -190,7 +190,9 @@ async def test_agreement_is_counted_per_judge(tmp_path):
     results, spend = await calibrate(items, answers, [JudgeSpec(**JUDGES[0])], client=client)
     row = results[2]
     assert (row.labeled, row.agreed, row.trusted) == (3, 2, False)
-    assert row.disagreements[0]["you"] == "yes" and row.disagreements[0]["judge"] == "no"
+    assert row.disagreements[0]["you"] == "something went wrong" and row.disagreements[0]["judge"] == "it was fine"
+    assert "you said something went wrong; the judge said it was fine. Its reason: r" in report(
+        results, {2: ("Answer matches what happened", "must_never_fail")})
     assert judge.calls == 3 and spend.cost_usd > 0
     names = {2: ("Answer matches what happened", "must_never_fail")}
     text = report(results, names)

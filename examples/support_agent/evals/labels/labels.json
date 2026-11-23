@@ -1,0 +1,41 @@
+{
+ "set": "2d505546",
+ "answers": {
+  "q6-1": "problem",
+  "q13-1": "problem",
+  "q7-1": "fine",
+  "q11-2": "fine",
+  "q7-3": "fine",
+  "q6-2": "problem",
+  "q13-2": "fine",
+  "q12-2": "fine",
+  "q2-2": "problem",
+  "q14-1": "problem",
+  "q11-3": "problem",
+  "q7-2": "fine",
+  "q6-3": "problem",
+  "q12-3": "fine",
+  "q12-1": "problem",
+  "q11-1": "problem",
+  "q14-3": "problem",
+  "q2-1": "problem",
+  "q14-2": "fine",
+  "q2-3": "problem",
+  "q13-3": "problem"
+ },
+ "corrections": {
+  "items": [
+   "q11-1",
+   "q12-1",
+   "q13-1",
+   "q13-3",
+   "q14-3",
+   "q2-2",
+   "q6-2",
+   "q6-3"
+  ],
+  "from": "fine",
+  "to": "problem",
+  "why": "On a second look the owner confirmed each one breaks their own rule (a pound sign on dollar amounts, 'started a refund' after it failed, a made-up refund time or follow-up, deleting without real proof). They had missed these details."
+ }
+}

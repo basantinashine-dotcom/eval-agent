@@ -531,7 +531,11 @@ async def calibrate(items: list[LabelItem], answers: dict[str, str], judges: lis
         if judged == answer:
             row.agreed += 1
         else:
-            row.disagreements.append({"item": item.id, "try": item.key, "you": answer, "judge": judged,
+            # In plain words, whichever way the judge's own question is asked.
+            def plain(a: str) -> str:
+                return "something went wrong" if a == spec.fail_when else "it was fine"
+
+            row.disagreements.append({"item": item.id, "try": item.key, "you": plain(answer), "judge": plain(judged),
                                       "judge_reason": verdict.reason.removeprefix("Judge: ")})
 
     try:
@@ -585,5 +589,6 @@ def report(results: dict[int, JudgeAgreement], names: dict[int, tuple[str, str]]
                  if not r.trusted and level == "must_never_fail" else "")
         lines.append(f"- {name}: agreed with you {r.agreed} of {r.labeled} times, so {status}.{extra}")
         for d in r.disagreements[:3]:
-            lines.append(f"    {d['try']}: you said {d['you']}, the judge said {d['judge']} ({d['judge_reason']})")
+            lines.append(f"    {d['try']}: you said {d['you']}; the judge said {d['judge']}. Its reason: "
+                         f"{d['judge_reason']}")
     return "\n".join(lines)
