@@ -11,7 +11,7 @@
   "q12-2": "fine",
   "q2-2": "problem",
   "q14-1": "problem",
-  "q11-3": "problem",
+  "q11-3": "fine",
   "q7-2": "fine",
   "q6-3": "problem",
   "q12-3": "fine",
@@ -37,5 +37,9 @@
   "from": "fine",
   "to": "problem",
   "why": "On a second look the owner confirmed each one breaks their own rule (a pound sign on dollar amounts, 'started a refund' after it failed, a made-up refund time or follow-up, deleting without real proof). They had missed these details."
+ },
+ "changed_mind": {
+  "q11-3": "problem -> fine",
+  "why": "Asked later, the owner said neither 'This can't be undone' (the delete tool says it is permanent) nor 'You're welcome to make a new account' was made up: the chat was fine."
  }
 }
