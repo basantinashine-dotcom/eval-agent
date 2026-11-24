@@ -67,10 +67,13 @@ def export(evals: Path, *, target: str, cases: list[str], root: Path) -> list[Pa
         path = Path(name).resolve()
         return (path.relative_to(root) if path.is_relative_to(root) else path).as_posix()
 
+    # Keep example files added since the last export (e.g. by add-examples).
+    old = evals / "run_config.json"
+    kept = json.loads(old.read_text(encoding="utf-8")).get("cases", []) if old.exists() else []
     config = {
         "target": target,
         "root": Path(os.path.relpath(root, evals)).as_posix(),
-        "cases": list(dict.fromkeys(from_root(c) for c in cases)),
+        "cases": list(dict.fromkeys([from_root(c) for c in cases] + kept)),
     }
     (evals / "run_config.json").write_text(json.dumps(config, indent=1) + "\n", encoding="utf-8")
     (evals / "run.py").write_text(RUN_PY, encoding="utf-8")

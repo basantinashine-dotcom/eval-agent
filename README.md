@@ -30,6 +30,7 @@ eval-agent score [RUN]         score a run with those tests
 eval-agent mutate              break a copy of your agent on purpose, and see if the right test notices
 eval-agent label               label about 20 of your agent's answers yourself (a page in your browser)
 eval-agent calibrate           see how often each judge agrees with your labels
+eval-agent add-examples        write the extra examples your approved plan asked for, and set their checks
 eval-agent export              make the tests run on their own: writes evals/run.py
 eval-agent run                 run the tests and report (same as python evals/run.py)
 ```
