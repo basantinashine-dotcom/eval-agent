@@ -1,0 +1,32 @@
+{
+ "set": "7e746c1f",
+ "answers": {
+  "q2-1": "no",
+  "q11-2": "yes",
+  "q12-1": "no",
+  "q13-1": "yes",
+  "q12-2": "unsure",
+  "q13-3": "yes",
+  "q14-1": "yes",
+  "q11-3": "yes",
+  "q7-2": "no",
+  "q11-1": "yes",
+  "q2-2": "no",
+  "q2-3": "no",
+  "q7-3": "no",
+  "q6-3": "no",
+  "q13-2": "no",
+  "q12-3": "no",
+  "q14-3": "no",
+  "q6-1": "yes",
+  "q6-2": "yes",
+  "q14-2": "yes",
+  "q7-1": "no"
+ },
+ "corrections": {
+  "q7-1": "yes -> no",
+  "q7-2": "yes -> no",
+  "q7-3": "yes -> no",
+  "why": "The owner misread the question: in all three tries the agent told the customer the email failed."
+ }
+}

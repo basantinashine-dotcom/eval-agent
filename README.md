@@ -28,6 +28,8 @@ eval-agent plan --approve      approve the current version (nothing gets built b
 eval-agent build               turn the approved plan into tests, proven on the runs you already have
 eval-agent score [RUN]         score a run with those tests
 eval-agent mutate              break a copy of your agent on purpose, and see if the right test notices
+eval-agent label               label about 20 of your agent's answers yourself (a page in your browser)
+eval-agent calibrate           see how often each judge agrees with your labels
 ```
 
 `setup`, `analyze`, `generate`, `plan`, `build` and `score` call Claude and show a cost estimate or cap
@@ -74,6 +76,16 @@ first (`--max-cost` stops them).
   scored with the built tests. It counts as **caught** when the test it was meant for fails more often
   than before the break, **weak** when your agent changed but no test noticed, and **no effect** when
   your agent did the same as before.
+- **Checking the judges** (`eval_agent/calibrate.py`): `label` picks about 3 tries per judge question.
+  It mixes tries that went wrong before, tries from the breaks, and ordinary ones, and writes
+  `evals/labels/label.html`, one page you open in any browser. You answer each question yourself,
+  without seeing the judge's answers, and save `labels.json`. `calibrate` asks the judges the same
+  questions and counts how often each agrees with you. A judge that agrees at least 9 times in 10 is
+  trusted. One that isn't (or was never checked, or whose question changed) can still flag a problem,
+  but `score` won't let it fail a "must never fail" check. After rewriting a judge's question to match
+  how you answered, `calibrate --recheck` shows whether it now says what you meant. It never grants
+  trust, because those are the answers the question was rewritten from. `label --fresh` starts a new
+  round with tries you haven't labeled, and keeps the old round.
 - **Pretend tools** (`eval_agent/fakes.py`): same names and schemas as the real ones, acting
   on a fresh world per run. They record every call and can be made to fail.
 - **Runner** (`eval_agent/runner.py`):

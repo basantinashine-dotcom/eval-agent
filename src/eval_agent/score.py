@@ -140,13 +140,16 @@ class JudgeSpec:
     check: int
     question: str
     fail_when: str   # "yes" or "no"
+    plain: str = ""  # the same question for a person, in everyday words; "yes" always means something went wrong
+    hint: str = ""   # one short sentence on what counts, for that person
 
     @classmethod
     def load_all(cls, path: Path) -> list[JudgeSpec]:
         if not path.exists():
             return []
         raw = json.loads(path.read_text(encoding="utf-8"))
-        return [cls(int(j["check"]), str(j["question"]), str(j.get("fail_when", "yes")).lower()) for j in raw]
+        return [cls(int(j["check"]), str(j["question"]), str(j.get("fail_when", "yes")).lower(),
+                    str(j.get("plain", "")), str(j.get("hint", ""))) for j in raw]
 
 
 async def judge_one(client: Any, model: str, spec: JudgeSpec, item: Item, expect: dict[str, Any],
@@ -205,6 +208,20 @@ def judge_estimate(jobs: int, model: str = JUDGE_MODEL) -> float:
     return round(jobs * (4000 * price_in + 800 * price_out) / 1e6, 2)
 
 
+def apply_trust(judged: dict[str, dict[int, Verdict]], trusted: dict[int, tuple[bool, str]],
+                must: set[int]) -> dict[str, dict[int, Verdict]]:
+    """An untrusted judge can flag a must-never-fail check but not fail it (FR-39)."""
+    out: dict[str, dict[int, Verdict]] = {}
+    for key, verdicts in judged.items():
+        out[key] = {}
+        for number, v in verdicts.items():
+            ok, why = trusted.get(number, (False, "its judge hasn't been checked against your labels yet"))
+            if v.status == "fail" and number in must and not ok:
+                v = Verdict("flag", f"{v.reason} (only flagged: {why})")
+            out[key][number] = v
+    return out
+
+
 def combine(code: dict[str, dict[int, Verdict]], judged: dict[str, dict[int, Verdict]]) -> dict[str, dict[int, Verdict]]:
     out: dict[str, dict[int, Verdict]] = {}
     for key in set(code) | set(judged):
@@ -212,8 +229,11 @@ def combine(code: dict[str, dict[int, Verdict]], judged: dict[str, dict[int, Ver
         for number in set(code.get(key, {})) | set(judged.get(key, {})):
             parts = [v for v in (code.get(key, {}).get(number), judged.get(key, {}).get(number)) if v]
             fails = [v for v in parts if v.status == "fail"]
+            flags = [v for v in parts if v.status == "flag"]
             if fails:
                 merged[number] = Verdict("fail", " / ".join(v.reason for v in fails))
+            elif flags:
+                merged[number] = Verdict("flag", " / ".join(v.reason for v in flags))
             elif any(v.status == "pass" for v in parts) and not any(v.status == "skip" and v.reason.startswith(BROKEN)
                                                                    for v in parts):
                 merged[number] = Verdict("pass", " / ".join(v.reason for v in parts if v.reason))
@@ -328,6 +348,7 @@ def scores_text(results: dict[str, dict[int, Verdict]], checks: dict[int, tuple[
         verdicts = [(key, v.get(number)) for key, v in sorted(results.items()) if v.get(number)]
         ran = [(k, v) for k, v in verdicts if v.status != "skip"]
         fails = [(k, v) for k, v in ran if v.status == "fail"]
+        flags = [(k, v) for k, v in ran if v.status == "flag"]
         broken = [(k, v) for k, v in verdicts if v.reason.startswith(BROKEN)]
         label = "Must never fail" if level == "must_never_fail" else "Should usually pass"
         if not ran:
@@ -337,6 +358,10 @@ def scores_text(results: dict[str, dict[int, Verdict]], checks: dict[int, tuple[
             lines += [f"  - {key.split('/', 1)[-1]}: {v.reason}" for key, v in fails[:3]]
             if level == "must_never_fail":
                 failed_must.append(name)
+        elif flags:
+            lines.append(f"Check {number}: {name} ({label}). Flagged in {len(flags)} of {len(ran)} tries by a judge "
+                         "that can't fail it yet.")
+            lines += [f"  - {key.split('/', 1)[-1]}: {v.reason}" for key, v in flags[:3]]
         else:
             all_passed += 1
             lines.append(f"Check {number}: {name} ({label}). Passed all {len(ran)} tries.")

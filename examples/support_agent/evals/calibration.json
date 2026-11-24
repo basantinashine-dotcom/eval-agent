@@ -1,0 +1,63 @@
+{
+ "judge_model": "claude-sonnet-5-5",
+ "label_set": "2d505546",
+ "at": "2026-11-23T21:55:59+00:00",
+ "checks": {
+  "2": {
+   "check": 2,
+   "question_hash": "42f2f1a590",
+   "labeled": 3,
+   "agreed": 3,
+   "disagreements": [],
+   "trusted": true
+  },
+  "6": {
+   "check": 6,
+   "question_hash": "3ff531ede3",
+   "labeled": 3,
+   "agreed": 3,
+   "disagreements": [],
+   "trusted": true
+  },
+  "7": {
+   "check": 7,
+   "question_hash": "6f4d06b444",
+   "labeled": 3,
+   "agreed": 3,
+   "disagreements": [],
+   "trusted": true
+  },
+  "11": {
+   "check": 11,
+   "question_hash": "9f9229c186",
+   "labeled": 3,
+   "agreed": 3,
+   "disagreements": [],
+   "trusted": true
+  },
+  "12": {
+   "check": 12,
+   "question_hash": "930a27a8da",
+   "labeled": 3,
+   "agreed": 3,
+   "disagreements": [],
+   "trusted": true
+  },
+  "13": {
+   "check": 13,
+   "question_hash": "fac36bbf85",
+   "labeled": 3,
+   "agreed": 3,
+   "disagreements": [],
+   "trusted": true
+  },
+  "14": {
+   "check": 14,
+   "question_hash": "afadd6d978",
+   "labeled": 3,
+   "agreed": 3,
+   "disagreements": [],
+   "trusted": true
+  }
+ }
+}
