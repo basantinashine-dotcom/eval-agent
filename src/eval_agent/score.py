@@ -79,7 +79,10 @@ def score_code(evals_dir: Path, items: list[Item], expectations: dict[str, Any],
     with tempfile.TemporaryDirectory(prefix="eval-agent-score-") as tmp:
         data = Path(tmp) / "input.json"
         data.write_text(json.dumps(payload, default=str), encoding="utf-8")
-        env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1", "PYTHONIOENCODING": "utf-8"}
+        # The helper process imports this same copy of eval_agent, installed or bundled next to a run.py.
+        here = str(Path(__file__).resolve().parent.parent)
+        path = os.pathsep.join(p for p in (here, os.environ.get("PYTHONPATH", "")) if p)
+        env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1", "PYTHONIOENCODING": "utf-8", "PYTHONPATH": path}
         try:
             out = subprocess.run([sys.executable, "-m", "eval_agent.score", str(data)], cwd=tmp, env=env,
                                  capture_output=True, text=True, encoding="utf-8", timeout=timeout_s)

@@ -30,7 +30,17 @@ eval-agent score [RUN]         score a run with those tests
 eval-agent mutate              break a copy of your agent on purpose, and see if the right test notices
 eval-agent label               label about 20 of your agent's answers yourself (a page in your browser)
 eval-agent calibrate           see how often each judge agrees with your labels
+eval-agent export              make the tests run on their own: writes evals/run.py
+eval-agent run                 run the tests and report (same as python evals/run.py)
 ```
+
+**Run your tests anywhere.** After `export`, `python evals/run.py` runs every example 3 times. It
+scores each try with your checks and trusted graders, and reports in plain words, including which
+checks gave mixed results across tries. It uses its own copy of the engine in `evals/_vendor/`, so
+the Eval Agent doesn't need to be installed: only Python, your agent's packages and keys, plus
+`anthropic` and `pydantic` for the graders. `--quick` runs each example once, for a fast check on
+every change. It exits with 1 if a "must never fail" check failed, so CI can block the change.
+Commit `evals/` (including `_vendor/`) to your repo.
 
 `setup`, `analyze`, `generate`, `plan`, `build` and `score` call Claude and show a cost estimate or cap
 first (`--max-cost` stops them).

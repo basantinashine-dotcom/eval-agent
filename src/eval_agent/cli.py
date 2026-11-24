@@ -14,6 +14,8 @@
     eval-agent mutate                             break a copy of the agent on purpose; see if the tests notice
     eval-agent label                              label some answers yourself, to check the judges
     eval-agent calibrate                          see how often each judge agrees with your labels
+    eval-agent export                             make the tests run on their own: writes evals/run.py
+    eval-agent run                                run the tests and report (3 tries per example)
 """
 
 from __future__ import annotations
@@ -805,6 +807,37 @@ def cmd_calibrate(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_export(args: argparse.Namespace) -> int:
+    from .export import export
+
+    evals = args.evals
+    state = _built(evals)
+    if state is None:
+        return 1
+    if not state.is_approved:
+        print(f"The plan in {evals} isn't approved yet, so the tests aren't final. Approve it and build first.")
+        return 1
+    facts = state.plan_facts()
+    target = args.target or facts.target
+    if not target:
+        print("I don't know how to start your agent. Pass --target module.path:function.")
+        return 1
+    cases = [str(c) for c in args.cases] if args.cases else [r.cases_file for r in facts.runs if r.cases_file]
+    written = export(evals, target=target, cases=cases, root=Path.cwd())
+    print(f"Wrote {written[0]}, {written[1].name} and a copy of the engine in {written[2].parent}.")
+    print("Anyone can now run your tests without the Eval Agent installed (they need your agent's packages and "
+          "keys):")
+    print(f"  python {written[0]}            every example, 3 tries each")
+    print(f"  python {written[0]} --quick    every example once")
+    return 0
+
+
+def cmd_run(args: argparse.Namespace) -> int:
+    from .standalone import main as run_tests
+
+    return run_tests(args.rest, evals_dir=args.evals)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="eval-agent", description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -886,6 +919,16 @@ def main(argv: list[str] | None = None) -> int:
                    "reports only, never makes a judge trusted")
     p.set_defaults(func=cmd_calibrate)
 
+    p = sub.add_parser("export", help="make the tests folder run on its own: writes evals/run.py")
+    p.add_argument("--evals", type=Path, default=Path("evals"), help="where the built tests are (default: evals)")
+    p.add_argument("--target", help="module.path:function that starts your agent (default: the plan's)")
+    p.add_argument("--cases", nargs="+", type=Path, help="example files to run (default: the ones the plan used)")
+    p.set_defaults(func=cmd_export)
+
+    p = sub.add_parser("run", help="run the tests and report (the same as python evals/run.py)")
+    p.add_argument("--evals", type=Path, default=Path("evals"), help="where the tests are (default: evals)")
+    p.set_defaults(func=cmd_run, rest=[])   # any other options go to the run itself (see run.py --help)
+
     p = sub.add_parser("cases", help="show how a golden dataset was read")
     p.add_argument("path", type=Path)
     p.set_defaults(func=cmd_cases)
@@ -919,7 +962,11 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--max-cost", type=float, default=1.0, help="stop if the estimate is above this, in $")
     p.set_defaults(func=cmd_generate)
 
-    args = parser.parse_args(argv)
+    args, unknown = parser.parse_known_args(argv)
+    if unknown:
+        if args.command != "run":
+            parser.error(f"unrecognized arguments: {' '.join(unknown)}")
+        args.rest = unknown   # `eval-agent run --quick` passes --quick on to the run
     loaded = load_dotenv()
     if loaded:
         print(f"Loaded {', '.join(loaded)} from .env")
