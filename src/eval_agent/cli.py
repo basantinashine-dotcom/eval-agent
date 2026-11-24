@@ -14,6 +14,8 @@
     eval-agent mutate                             break a copy of the agent on purpose; see if the tests notice
     eval-agent label                              label some answers yourself, to check the judges
     eval-agent calibrate                          see how often each judge agrees with your labels
+    eval-agent export                             make the tests run on their own: writes evals/run.py
+    eval-agent run                                run the tests and report (3 tries per example)
 """
 
 from __future__ import annotations
@@ -523,7 +525,7 @@ def cmd_score(args: argparse.Namespace) -> int:
     from .plan import load_state
     from .calibrate import trust
     from .score import JUDGE_MODEL, JudgeSpec, apply_trust, combine, judge_estimate, judge_jobs, load_items
-    from .score import score_code, score_judges, scores_text
+    from .score import score_code, score_judges, scores_text, tools_text
 
     run_dir = args.run or _latest_run(Path("runs"))
     if run_dir is None or not (run_dir / "traces.jsonl").exists():
@@ -548,8 +550,9 @@ def cmd_score(args: argparse.Namespace) -> int:
     if estimate > args.max_cost:
         print(f"That's more than --max-cost (${args.max_cost:.2f}). Raise it to go ahead.")
         return 1
-    judged, spend = asyncio.run(score_judges(jobs, model=judge_model)) if jobs else ({}, Spend())
     state = load_state(evals / "plan.json") if (evals / "plan.json").exists() else None
+    tools = tools_text(state.plan_facts().tools) if state else ""
+    judged, spend = asyncio.run(score_judges(jobs, model=judge_model, tools=tools)) if jobs else ({}, Spend())
     names = {n: (c.name, c.level) for n, c in enumerate(state.plan().checks, start=1)} if state else \
         {n: (f"check {n}", "should_usually_pass") for v in {**code.results, **judged}.values() for n in v}
     must = {n for n, (_, level) in names.items() if level == "must_never_fail"}
@@ -581,7 +584,7 @@ def cmd_mutate(args: argparse.Namespace) -> int:
         strengthen,
     )
     from .plan import MODEL, load_state
-    from .score import JUDGE_MODEL, JudgeSpec
+    from .score import JUDGE_MODEL, JudgeSpec, tools_text
 
     evals = args.evals
     if not (evals / "plan.json").exists() or not (evals / "expectations.json").exists():
@@ -649,7 +652,8 @@ def cmd_mutate(args: argparse.Namespace) -> int:
     run = asyncio.run(run_mutations(
         plan, target=target, evals=evals, cases=cases, expectations=expectations, judges=judges,
         baseline_runs=baseline_runs, check_numbers=set(names), reps=args.reps, max_cases=args.max_cases,
-        judge_model=judge_model, out_dir=out_dir, emit=lambda line: print(f"  {line}", flush=True)))
+        judge_model=judge_model, out_dir=out_dir, emit=lambda line: print(f"  {line}", flush=True),
+        tools=tools_text(facts.tools)))
     resisted = [r for r in run.results if r.verdict == "resisted"]
     if resisted and not reused and not args.no_retry:
         print(f"\n  Your agent resisted {len(resisted)} breaks; designing a stronger try at each.")
@@ -664,7 +668,8 @@ def cmd_mutate(args: argparse.Namespace) -> int:
             again = asyncio.run(run_mutations(
                 stronger, target=target, evals=evals, cases=cases, expectations=expectations, judges=judges,
                 baseline_runs=baseline_runs, check_numbers=set(names), reps=args.reps, max_cases=args.max_cases,
-                judge_model=judge_model, out_dir=out_dir, emit=lambda line: print(f"  {line}", flush=True)))
+                judge_model=judge_model, out_dir=out_dir, emit=lambda line: print(f"  {line}", flush=True),
+                tools=tools_text(facts.tools)))
             run.results += again.results
             run.skipped += again.skipped
             run.agent_cost_usd += again.agent_cost_usd
@@ -761,7 +766,7 @@ def cmd_label(args: argparse.Namespace) -> int:
 
 def cmd_calibrate(args: argparse.Namespace) -> int:
     from .calibrate import calibrate, find_labels, load_label_set, read_answers, report, save_calibration
-    from .score import JUDGE_MODEL, JudgeSpec, judge_estimate
+    from .score import JUDGE_MODEL, JudgeSpec, judge_estimate, tools_text
 
     evals = args.evals
     state = _built(evals)
@@ -794,7 +799,8 @@ def cmd_calibrate(args: argparse.Namespace) -> int:
               "match how you answered, this shows whether it now says what you meant. It doesn't make a judge "
               "trusted, because these are the answers it was rewritten from: label a fresh round for that "
               "(eval-agent label --fresh).")
-    results, spend = asyncio.run(calibrate(items, answers, judges, model=judge_model, allow_revised=args.recheck))
+    results, spend = asyncio.run(calibrate(items, answers, judges, model=judge_model, allow_revised=args.recheck,
+                                           tools=tools_text(state.plan_facts().tools)))
     print()
     print(report(results, names))
     if args.recheck:
@@ -803,6 +809,37 @@ def cmd_calibrate(args: argparse.Namespace) -> int:
     save_calibration(evals, results, judge_model, name)
     print(f"\nCost: ${spend.cost_usd:.2f}. Saved to {evals / 'calibration.json'}; `eval-agent score` uses it from now on.")
     return 0
+
+
+def cmd_export(args: argparse.Namespace) -> int:
+    from .export import export
+
+    evals = args.evals
+    state = _built(evals)
+    if state is None:
+        return 1
+    if not state.is_approved:
+        print(f"The plan in {evals} isn't approved yet, so the tests aren't final. Approve it and build first.")
+        return 1
+    facts = state.plan_facts()
+    target = args.target or facts.target
+    if not target:
+        print("I don't know how to start your agent. Pass --target module.path:function.")
+        return 1
+    cases = [str(c) for c in args.cases] if args.cases else [r.cases_file for r in facts.runs if r.cases_file]
+    written = export(evals, target=target, cases=cases, root=Path.cwd())
+    print(f"Wrote {written[0]}, {written[1].name} and a copy of the engine in {written[2].parent}.")
+    print("Anyone can now run your tests without the Eval Agent installed (they need your agent's packages and "
+          "keys):")
+    print(f"  python {written[0]}            every example, 3 tries each")
+    print(f"  python {written[0]} --quick    every example once")
+    return 0
+
+
+def cmd_run(args: argparse.Namespace) -> int:
+    from .standalone import main as run_tests
+
+    return run_tests(args.rest, evals_dir=args.evals)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -886,6 +923,16 @@ def main(argv: list[str] | None = None) -> int:
                    "reports only, never makes a judge trusted")
     p.set_defaults(func=cmd_calibrate)
 
+    p = sub.add_parser("export", help="make the tests folder run on its own: writes evals/run.py")
+    p.add_argument("--evals", type=Path, default=Path("evals"), help="where the built tests are (default: evals)")
+    p.add_argument("--target", help="module.path:function that starts your agent (default: the plan's)")
+    p.add_argument("--cases", nargs="+", type=Path, help="example files to run (default: the ones the plan used)")
+    p.set_defaults(func=cmd_export)
+
+    p = sub.add_parser("run", help="run the tests and report (the same as python evals/run.py)")
+    p.add_argument("--evals", type=Path, default=Path("evals"), help="where the tests are (default: evals)")
+    p.set_defaults(func=cmd_run, rest=[])   # any other options go to the run itself (see run.py --help)
+
     p = sub.add_parser("cases", help="show how a golden dataset was read")
     p.add_argument("path", type=Path)
     p.set_defaults(func=cmd_cases)
@@ -919,7 +966,11 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--max-cost", type=float, default=1.0, help="stop if the estimate is above this, in $")
     p.set_defaults(func=cmd_generate)
 
-    args = parser.parse_args(argv)
+    args, unknown = parser.parse_known_args(argv)
+    if unknown:
+        if args.command != "run":
+            parser.error(f"unrecognized arguments: {' '.join(unknown)}")
+        args.rest = unknown   # `eval-agent run --quick` passes --quick on to the run
     loaded = load_dotenv()
     if loaded:
         print(f"Loaded {', '.join(loaded)} from .env")

@@ -12,3 +12,6 @@ runs/
 
 # Local "real" data written by the sample agent's tools
 examples/support_agent/data/
+
+# The sample agent's exported engine copy (in your own repo, commit _vendor/ so CI can run the tests)
+examples/support_agent/evals/_vendor/

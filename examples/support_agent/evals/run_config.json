@@ -1,0 +1,8 @@
+{
+ "target": "examples.support_agent.target:make_target",
+ "root": "../../..",
+ "cases": [
+  "examples/support_agent/cases.jsonl",
+  "examples/support_agent/added/cases-generated-20261120-213117.jsonl"
+ ]
+}

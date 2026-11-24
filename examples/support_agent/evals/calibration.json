@@ -1,7 +1,8 @@
 {
  "judge_model": "claude-sonnet-5-5",
+ "judge_setup": "tools-v1",
  "label_set": "2d505546",
- "at": "2026-11-23T21:55:59+00:00",
+ "at": "2026-11-24T18:51:31+00:00",
  "checks": {
   "2": {
    "check": 2,

@@ -32,6 +32,7 @@ from .score import (
     labels,
     load_items,
     score_code,
+    tools_text,
     validate,
     validation_text,
 )
@@ -278,7 +279,7 @@ class Builder:
                 async with sem:
                     try:
                         verdict = await judge_one(self.judge_client, self.judge_model, spec, item, expect,
-                                                  self.judge_spend)
+                                                  self.judge_spend, tools_text(self.facts.tools))
                     except Exception as exc:
                         verdict = Verdict("skip", f"Judge couldn't answer: {type(exc).__name__}: {exc}")
                 self.judge_cache[cache_key] = verdict
