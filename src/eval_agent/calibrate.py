@@ -27,7 +27,7 @@ from pydantic import BaseModel, Field
 
 from .analyze import Spend, render_case, render_run, world_changes
 from .dataset import Case
-from .score import JUDGE_MODEL, Item, JudgeSpec, judge_one, labels, load_items, score_code
+from .score import JUDGE_MODEL, JUDGE_SETUP, Item, JudgeSpec, judge_one, labels, load_items, score_code
 from .testkit import expectations_for
 from .trace import Trace, read_traces
 
@@ -497,7 +497,7 @@ class JudgeAgreement:
 
 async def calibrate(items: list[LabelItem], answers: dict[str, str], judges: list[JudgeSpec], *,
                     model: str = JUDGE_MODEL, client: Any = None,
-                    allow_revised: bool = False) -> tuple[dict[int, JudgeAgreement], Spend]:
+                    allow_revised: bool = False, tools: str = "") -> tuple[dict[int, JudgeAgreement], Spend]:
     """Ask each judge its question on the labeled tries and count agreement with the owner.
 
     Labels given to an older wording of a question are left out, unless allow_revised (a re-check
@@ -522,7 +522,8 @@ async def calibrate(items: list[LabelItem], answers: dict[str, str], judges: lis
         case = Case(**item.case) if item.case else None
         async with sem:
             try:
-                verdict = await judge_one(client, model, spec, Item(item.key, trace, case), item.notes, spend)
+                verdict = await judge_one(client, model, spec, Item(item.key, trace, case), item.notes, spend,
+                                          tools)
             except Exception:
                 return
         judged = spec.fail_when if verdict.status == "fail" else ("no" if spec.fail_when == "yes" else "yes")
@@ -548,7 +549,8 @@ async def calibrate(items: list[LabelItem], answers: dict[str, str], judges: lis
 
 def save_calibration(evals: Path, results: dict[int, JudgeAgreement], model: str, set_name: str) -> None:
     (evals / "calibration.json").write_text(json.dumps({
-        "judge_model": model, "label_set": set_name, "at": datetime.now(UTC).isoformat(timespec="seconds"),
+        "judge_model": model, "judge_setup": JUDGE_SETUP, "label_set": set_name,
+        "at": datetime.now(UTC).isoformat(timespec="seconds"),
         "checks": {str(n): {**asdict(r), "trusted": r.trusted} for n, r in results.items()},
     }, indent=1, ensure_ascii=False), encoding="utf-8")
 
@@ -566,6 +568,9 @@ def trust(evals: Path, judges: list[JudgeSpec], judge_model: str) -> dict[int, t
             out[spec.check] = (False, "its judge's question changed since you labeled, so it needs checking again")
         elif saved.get("judge_model") != judge_model:
             out[spec.check] = (False, f"its judge was checked with {saved.get('judge_model')}, not {judge_model}")
+        elif saved.get("judge_setup") != JUDGE_SETUP:
+            out[spec.check] = (False, "its judge was checked before it was shown what your agent's tools do, so it "
+                                      "needs checking again")
         elif not row.get("trusted"):
             out[spec.check] = (False, f"its judge agreed with you only {row['agreed']} of {row['labeled']} times")
         else:

@@ -525,7 +525,7 @@ def cmd_score(args: argparse.Namespace) -> int:
     from .plan import load_state
     from .calibrate import trust
     from .score import JUDGE_MODEL, JudgeSpec, apply_trust, combine, judge_estimate, judge_jobs, load_items
-    from .score import score_code, score_judges, scores_text
+    from .score import score_code, score_judges, scores_text, tools_text
 
     run_dir = args.run or _latest_run(Path("runs"))
     if run_dir is None or not (run_dir / "traces.jsonl").exists():
@@ -550,8 +550,9 @@ def cmd_score(args: argparse.Namespace) -> int:
     if estimate > args.max_cost:
         print(f"That's more than --max-cost (${args.max_cost:.2f}). Raise it to go ahead.")
         return 1
-    judged, spend = asyncio.run(score_judges(jobs, model=judge_model)) if jobs else ({}, Spend())
     state = load_state(evals / "plan.json") if (evals / "plan.json").exists() else None
+    tools = tools_text(state.plan_facts().tools) if state else ""
+    judged, spend = asyncio.run(score_judges(jobs, model=judge_model, tools=tools)) if jobs else ({}, Spend())
     names = {n: (c.name, c.level) for n, c in enumerate(state.plan().checks, start=1)} if state else \
         {n: (f"check {n}", "should_usually_pass") for v in {**code.results, **judged}.values() for n in v}
     must = {n for n, (_, level) in names.items() if level == "must_never_fail"}
@@ -583,7 +584,7 @@ def cmd_mutate(args: argparse.Namespace) -> int:
         strengthen,
     )
     from .plan import MODEL, load_state
-    from .score import JUDGE_MODEL, JudgeSpec
+    from .score import JUDGE_MODEL, JudgeSpec, tools_text
 
     evals = args.evals
     if not (evals / "plan.json").exists() or not (evals / "expectations.json").exists():
@@ -651,7 +652,8 @@ def cmd_mutate(args: argparse.Namespace) -> int:
     run = asyncio.run(run_mutations(
         plan, target=target, evals=evals, cases=cases, expectations=expectations, judges=judges,
         baseline_runs=baseline_runs, check_numbers=set(names), reps=args.reps, max_cases=args.max_cases,
-        judge_model=judge_model, out_dir=out_dir, emit=lambda line: print(f"  {line}", flush=True)))
+        judge_model=judge_model, out_dir=out_dir, emit=lambda line: print(f"  {line}", flush=True),
+        tools=tools_text(facts.tools)))
     resisted = [r for r in run.results if r.verdict == "resisted"]
     if resisted and not reused and not args.no_retry:
         print(f"\n  Your agent resisted {len(resisted)} breaks; designing a stronger try at each.")
@@ -666,7 +668,8 @@ def cmd_mutate(args: argparse.Namespace) -> int:
             again = asyncio.run(run_mutations(
                 stronger, target=target, evals=evals, cases=cases, expectations=expectations, judges=judges,
                 baseline_runs=baseline_runs, check_numbers=set(names), reps=args.reps, max_cases=args.max_cases,
-                judge_model=judge_model, out_dir=out_dir, emit=lambda line: print(f"  {line}", flush=True)))
+                judge_model=judge_model, out_dir=out_dir, emit=lambda line: print(f"  {line}", flush=True),
+                tools=tools_text(facts.tools)))
             run.results += again.results
             run.skipped += again.skipped
             run.agent_cost_usd += again.agent_cost_usd
@@ -763,7 +766,7 @@ def cmd_label(args: argparse.Namespace) -> int:
 
 def cmd_calibrate(args: argparse.Namespace) -> int:
     from .calibrate import calibrate, find_labels, load_label_set, read_answers, report, save_calibration
-    from .score import JUDGE_MODEL, JudgeSpec, judge_estimate
+    from .score import JUDGE_MODEL, JudgeSpec, judge_estimate, tools_text
 
     evals = args.evals
     state = _built(evals)
@@ -796,7 +799,8 @@ def cmd_calibrate(args: argparse.Namespace) -> int:
               "match how you answered, this shows whether it now says what you meant. It doesn't make a judge "
               "trusted, because these are the answers it was rewritten from: label a fresh round for that "
               "(eval-agent label --fresh).")
-    results, spend = asyncio.run(calibrate(items, answers, judges, model=judge_model, allow_revised=args.recheck))
+    results, spend = asyncio.run(calibrate(items, answers, judges, model=judge_model, allow_revised=args.recheck,
+                                           tools=tools_text(state.plan_facts().tools)))
     print()
     print(report(results, names))
     if args.recheck:

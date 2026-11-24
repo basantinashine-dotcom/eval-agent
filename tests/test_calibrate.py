@@ -258,6 +258,44 @@ def test_trust_follows_labels_question_and_model(tmp_path):
                                                                    "labels yet"), "no labels isn't 0 of 0"
 
 
+async def test_judges_see_what_the_agents_tools_do(tmp_path):
+    from eval_agent.score import Item, judge_one, tools_text
+    from eval_agent.trace import Trace
+
+    _, items = picked(tmp_path)
+    tools = tools_text([{"name": "delete_account", "what_it_does": "Permanently delete an account.",
+                         "changes_real_world": True}])
+    assert tools == ("<tools>\n- delete_account: Permanently delete an account. [changes things in the real world]"
+                     "\n</tools>")
+    client, judge = fake_client()
+    seen = []
+    original = judge.parse
+
+    async def spy(**kw):
+        seen.append(kw)
+        return await original(**kw)
+
+    judge.parse = spy
+    item = items[0]
+    await judge_one(client, "claude-sonnet-5-5", JudgeSpec(**JUDGES[0]),
+                    Item(item.key, Trace.from_dict(item.trace), None), {}, calibrate_mod.Spend(), tools)
+    assert seen[0]["messages"][0]["content"].startswith(tools)
+    assert "can't be undone is supported" in seen[0]["system"]
+
+
+def test_trust_from_before_judges_saw_the_tools_needs_a_recheck(tmp_path):
+    evals = tmp_path / "evals"
+    evals.mkdir()
+    spec = JudgeSpec(**JUDGES[0])
+    save_calibration(evals, {2: JudgeAgreement(2, question_hash(spec), labeled=3, agreed=3)}, "claude-sonnet-5-5", "s")
+    old = json.loads((evals / "calibration.json").read_text(encoding="utf-8"))
+    assert old["judge_setup"] == "tools-v1"
+    del old["judge_setup"]
+    (evals / "calibration.json").write_text(json.dumps(old), encoding="utf-8")
+    assert trust(evals, [spec], "claude-sonnet-5-5")[2] == (
+        False, "its judge was checked before it was shown what your agent's tools do, so it needs checking again")
+
+
 def test_an_untrusted_judge_flags_but_cant_fail_a_must_never_fail_check():
     judged = {"r1/a#0": {2: Verdict("fail", "Judge: it said the refund went through"), 3: Verdict("fail", "J")}}
     trusted = {2: (False, "its judge agreed with you only 2 of 3 times"), 3: (False, "x")}

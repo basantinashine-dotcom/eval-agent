@@ -94,6 +94,7 @@ def _main(argv: list[str] | None, evals_dir: Path | None) -> int:
         score_code,
         score_judges,
         scores_text,
+        tools_text,
     )
     from .testkit import expectations_for
     from .trace import write_jsonl
@@ -190,7 +191,8 @@ def _main(argv: list[str] | None, evals_dir: Path | None) -> int:
     judged: dict[str, Any] = {}
     jobs = judge_jobs(judges, items, expectations, code.results, set(code.registered))
     if jobs:
-        judged, spend = asyncio.run(score_judges(jobs, model=judge_model))
+        judged, spend = asyncio.run(score_judges(jobs, model=judge_model,
+                                                 tools=tools_text(state.plan_facts().tools)))
     results = combine(code.results, apply_trust(judged, trust(evals, judges, judge_model), must))
 
     report = scores_text(results, names, stamp)

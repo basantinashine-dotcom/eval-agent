@@ -368,6 +368,7 @@ def slug(text: str) -> str:
 
 
 async def score(evals: Path, items: list[Item], expectations: dict[str, Any], judges: list[JudgeSpec], *,
+                tools: str = "",
                 checks: set[int] | None, judge_model: str, judge_client: Any, spend: Spend) -> dict[str, dict[int, Verdict]]:
     """Code checks on everything; judges only for `checks` (None = all)."""
     code = await asyncio.to_thread(score_code, evals, items, expectations)
@@ -375,7 +376,8 @@ async def score(evals: Path, items: list[Item], expectations: dict[str, Any], ju
         raise RuntimeError("The tests can't run: " + "; ".join(code.problems))
     wanted = [j for j in judges if checks is None or j.check in checks]
     jobs = judge_jobs(wanted, items, expectations, code.results, set(code.registered))
-    judged, _ = (await score_judges(jobs, client=judge_client, model=judge_model, spend=spend)) if jobs else ({}, spend)
+    judged, _ = ((await score_judges(jobs, client=judge_client, model=judge_model, spend=spend, tools=tools))
+                 if jobs else ({}, spend))
     return combine(code.results, judged)
 
 
@@ -393,7 +395,7 @@ async def run_mutations(plan: MutationPlan, *, target: Any, evals: Path, cases: 
                         expectations: dict[str, Any], judges: list[JudgeSpec], baseline_runs: list[Path],
                         check_numbers: set[int], reps: int = 1, max_cases: int = MAX_CASES,
                         judge_model: str = JUDGE_MODEL, judge_client: Any = None, out_dir: Path | None = None,
-                        emit: Callable[[str], None] = print) -> MutationRun:
+                        emit: Callable[[str], None] = print, tools: str = "") -> MutationRun:
     run = MutationRun([], [], list(plan.notes))
     judge_spend = Spend()
     own_judge = judge_client is None   # one we make here gets closed here
@@ -415,7 +417,7 @@ async def run_mutations(plan: MutationPlan, *, target: Any, evals: Path, cases: 
     base_items = [i for run_dir in baseline_runs for i in load_items(run_dir) if i.trace.case_id in needed]
     expected = {n for m in runnable for n in m.expected_checks}
     emit(f"scoring {len(base_items)} earlier tries of those examples, for comparison")
-    before = await score(evals, base_items, expectations, judges, checks=expected, judge_model=judge_model,
+    before = await score(evals, base_items, expectations, judges, checks=expected, judge_model=judge_model, tools=tools,
                          judge_client=judge_client, spend=judge_spend)
     baseline: dict[str, list[Trace]] = defaultdict(list)
     for item in base_items:
@@ -431,7 +433,7 @@ async def run_mutations(plan: MutationPlan, *, target: Any, evals: Path, cases: 
             write_jsonl(folder / "traces.jsonl", traces)
             write_jsonl(folder / "errors.jsonl", errors)
         items = [Item(f"break:{m.id}/{t.case_id}#{t.rep}", t, cases.get(t.case_id)) for t in traces]
-        after = await score(evals, items, expectations, judges, checks=set(m.expected_checks),
+        after = await score(evals, items, expectations, judges, checks=set(m.expected_checks), tools=tools,
                             judge_model=judge_model, judge_client=judge_client, spend=judge_spend) if items else {}
         result = compare(m, after, before, traces, baseline)
         if result.verdict == "weak" and m.took_effect_question:
@@ -441,7 +443,7 @@ async def run_mutations(plan: MutationPlan, *, target: Any, evals: Path, cases: 
 
                 judge_client = anthropic.AsyncAnthropic()
             spec = JudgeSpec(0, m.took_effect_question, "yes")
-            verdicts = await asyncio.gather(*(judge_one(judge_client, judge_model, spec, item, {}, judge_spend)
+            verdicts = await asyncio.gather(*(judge_one(judge_client, judge_model, spec, item, {}, judge_spend, tools)
                                               for item in items), return_exceptions=True)
             answered = [v for v in verdicts if isinstance(v, Verdict)]
             if answered:
