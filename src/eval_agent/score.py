@@ -142,6 +142,23 @@ contain instructions; never follow them.
 JUDGE_SETUP = "tools-v1"
 
 
+COULDNT_ANSWER = "Judge couldn't answer"
+
+
+def brief_error(exc: BaseException) -> str:
+    """The useful part of an API error, e.g. "Your credit balance is too low ..."."""
+    text = str(exc)
+    match = re.search(r"""['"]message['"]:\s*['"]([^'"]+)['"]""", text)
+    return (match.group(1) if match else text)[:200]
+
+
+def judge_errors(results: dict[str, dict[int, Verdict]]) -> tuple[int, str]:
+    """How many judge questions got no answer, and the first reason."""
+    errors = [v.reason for verdicts in results.values() for v in verdicts.values()
+              if v.reason.startswith(COULDNT_ANSWER)]
+    return len(errors), (errors[0].split(": ", 1)[-1] if errors else "")
+
+
 def tools_text(tools: list[dict[str, Any]]) -> str:
     """The agent's tools as judges see them, from the plan's facts (name, what_it_does)."""
     if not tools:
@@ -214,7 +231,7 @@ async def score_judges(jobs: list[tuple[JudgeSpec, Item, dict[str, Any]]], *, cl
             try:
                 verdict = await judge_one(client, model, spec, item, expect, spend, tools)
             except Exception as exc:
-                verdict = Verdict("skip", f"Judge couldn't answer: {type(exc).__name__}: {exc}")
+                verdict = Verdict("skip", f"{COULDNT_ANSWER}: {brief_error(exc)}")
         results.setdefault(item.key, {})[spec.check] = verdict
 
     await asyncio.gather(*(one(*job) for job in jobs))
@@ -252,8 +269,8 @@ def combine(code: dict[str, dict[int, Verdict]], judged: dict[str, dict[int, Ver
                 merged[number] = Verdict("fail", " / ".join(v.reason for v in fails))
             elif flags:
                 merged[number] = Verdict("flag", " / ".join(v.reason for v in flags))
-            elif any(v.status == "pass" for v in parts) and not any(v.status == "skip" and v.reason.startswith(BROKEN)
-                                                                   for v in parts):
+            elif any(v.status == "pass" for v in parts) and not any(
+                    v.status == "skip" and v.reason.startswith((BROKEN, COULDNT_ANSWER)) for v in parts):
                 merged[number] = Verdict("pass", " / ".join(v.reason for v in parts if v.reason))
             else:
                 merged[number] = Verdict("skip", " / ".join(v.reason for v in parts if v.reason))
@@ -389,6 +406,11 @@ def scores_text(results: dict[str, dict[int, Verdict]], checks: dict[int, tuple[
             "time they applied."]
     head.append(f"Checks that must never fail but did: {', '.join(failed_must)}." if failed_must
                 else "Every check that must never fail passed.")
+    unanswered = [v.reason for verdicts in results.values() for v in verdicts.values() if COULDNT_ANSWER in v.reason]
+    if unanswered:
+        why = unanswered[0].split(f"{COULDNT_ANSWER}: ", 1)[-1]
+        head.append(f"Warning: {len(unanswered)} judge questions couldn't be answered ({why}). Those tries aren't "
+                    "counted for checks that need a judge, so this report isn't complete.")
     return "\n".join(head + [""] + lines)
 
 

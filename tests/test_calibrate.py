@@ -347,3 +347,58 @@ def test_label_and_calibrate_commands(tmp_path, monkeypatch, capsys):
     assert "A fresh round: 2 tries you haven't labeled for these questions." in out
     assert f"Your earlier round is kept in {evals / 'labels' / f'round-{name}'}" in out
     assert load_label_set(evals)[0] != name
+
+
+CREDIT = ("Error code: 400 - {'type': 'error', 'error': {'type': 'invalid_request_error', 'message': 'Your credit "
+          "balance is too low to access the Anthropic API.'}}")
+
+
+class Broke:
+    """An API that refuses every call, like an account with no credit."""
+
+    async def parse(self, **kw):
+        raise RuntimeError(CREDIT)
+
+
+def test_api_errors_are_short_and_never_count_as_a_pass():
+    from eval_agent.score import COULDNT_ANSWER, brief_error, judge_errors
+
+    assert brief_error(RuntimeError(CREDIT)) == "Your credit balance is too low to access the Anthropic API."
+    unanswered = Verdict("skip", f"{COULDNT_ANSWER}: Your credit balance is too low.")
+    out = combine({"r/a#0": {2: Verdict("pass", "handed over")}}, {"r/a#0": {2: unanswered}})
+    assert out["r/a#0"][2].status == "skip", "a judge that couldn't answer doesn't make the check pass"
+    assert judge_errors({"r/a#0": {2: unanswered}}) == (1, "Your credit balance is too low.")
+    text = scores_text(out, {2: ("Answer matches", "must_never_fail")}, "r")
+    assert ("Warning: 1 judge questions couldn't be answered (Your credit balance is too low.). Those tries aren't "
+            "counted for checks that need a judge, so this report isn't complete.") in text
+
+
+async def test_calibrating_reports_errors_instead_of_no_labels(tmp_path):
+    _, items = picked(tmp_path)
+    answers = {i.id: "yes" for i in items}
+    results, _ = await calibrate(items, answers, [JudgeSpec(**JUDGES[0])],
+                                 client=SimpleNamespace(beta=SimpleNamespace(messages=Broke())))
+    assert (results[2].labeled, results[2].errors) == (0, 3)
+    text = report(results, {2: ("Answer matches what happened", "must_never_fail")})
+    assert text.startswith("Warning: the judges couldn't answer 3 times (Your credit balance is too low to access "
+                           "the Anthropic API.).")
+    assert "- Answer matches what happened: couldn't ask its judge (3 times)." in text
+
+
+def test_a_failed_check_never_wipes_out_trust(tmp_path, capsys, monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test")
+    run, evals = built(tmp_path)
+    assert main(["label", "--evals", str(evals), "--runs", str(run), "--runs-dir", str(tmp_path / "runs")]) == 0
+    name, items = load_label_set(evals)
+    (evals / "labels" / "labels.json").write_text(json.dumps({"set": name, "answers": {i.id: "yes" for i in items}}),
+                                                  encoding="utf-8")
+    (evals / "calibration.json").write_text('{"before": true}', encoding="utf-8")
+    real = calibrate_mod.calibrate
+
+    async def broke(items, answers, judges, **kw):
+        return await real(items, answers, judges, client=SimpleNamespace(beta=SimpleNamespace(messages=Broke())))
+
+    monkeypatch.setattr(calibrate_mod, "calibrate", broke)
+    assert main(["calibrate", "--evals", str(evals)]) == 1
+    assert "Nothing saved, because some judge questions got no answer" in capsys.readouterr().out
+    assert json.loads((evals / "calibration.json").read_text(encoding="utf-8")) == {"before": True}

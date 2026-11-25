@@ -807,6 +807,10 @@ def cmd_calibrate(args: argparse.Namespace) -> int:
     if args.recheck:
         print(f"\nCost: ${spend.cost_usd:.2f}. Nothing saved: trust stays as it was.")
         return 0
+    if any(r.errors for r in results.values()):
+        print(f"\nCost: ${spend.cost_usd:.2f}. Nothing saved, because some judge questions got no answer; trust "
+              "stays as it was. Fix the problem above and run this again.")
+        return 1
     save_calibration(evals, results, judge_model, name)
     print(f"\nCost: ${spend.cost_usd:.2f}. Saved to {evals / 'calibration.json'}; `eval-agent score` uses it from now on.")
     return 0

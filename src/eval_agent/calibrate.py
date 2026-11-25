@@ -27,7 +27,17 @@ from pydantic import BaseModel, Field
 
 from .analyze import Spend, render_case, render_run, world_changes
 from .dataset import Case
-from .score import JUDGE_MODEL, JUDGE_SETUP, Item, JudgeSpec, judge_one, labels, load_items, score_code
+from .score import (
+    JUDGE_MODEL,
+    JUDGE_SETUP,
+    Item,
+    JudgeSpec,
+    brief_error,
+    judge_one,
+    labels,
+    load_items,
+    score_code,
+)
 from .testkit import expectations_for
 from .trace import Trace, read_traces
 
@@ -489,6 +499,8 @@ class JudgeAgreement:
     labeled: int = 0
     agreed: int = 0
     disagreements: list[dict[str, str]] = field(default_factory=list)
+    errors: int = 0              # judge questions that got no answer (an API problem, not a disagreement)
+    error: str = ""
 
     @property
     def trusted(self) -> bool:
@@ -524,7 +536,9 @@ async def calibrate(items: list[LabelItem], answers: dict[str, str], judges: lis
             try:
                 verdict = await judge_one(client, model, spec, Item(item.key, trace, case), item.notes, spend,
                                           tools)
-            except Exception:
+            except Exception as exc:
+                results[item.check].errors += 1
+                results[item.check].error = brief_error(exc)
                 return
         judged = spec.fail_when if verdict.status == "fail" else ("no" if spec.fail_when == "yes" else "yes")
         row = results[item.check]
@@ -581,13 +595,19 @@ def trust(evals: Path, judges: list[JudgeSpec], judge_model: str) -> dict[int, t
 def report(results: dict[int, JudgeAgreement], names: dict[int, tuple[str, str]]) -> str:
     """names: check -> (name, level)."""
     lines = []
+    errors = sum(r.errors for r in results.values())
+    if errors:
+        why = next(r.error for r in results.values() if r.error)
+        lines.append(f"Warning: the judges couldn't answer {errors} times ({why}). Those answers aren't counted, so "
+                     "this check isn't complete.")
     trusted = sum(1 for r in results.values() if r.trusted)
     lines.append(f"{trusted} of {len(results)} judges agree with you often enough to trust (at least 9 times in 10, "
                  f"on at least {MIN_LABELS} labels).")
     for n, r in sorted(results.items()):
         name, level = names.get(n, (f"check {n}", ""))
         if not r.labeled:
-            lines.append(f"- {name}: no labels to compare yet.")
+            lines.append(f"- {name}: " + (f"couldn't ask its judge ({r.errors} times)." if r.errors
+                                          else "no labels to compare yet."))
             continue
         status = "trusted" if r.trusted else "not trusted yet"
         extra = (" It can still flag problems, but it can't fail this must-never-fail check."
