@@ -3,6 +3,7 @@
  "root": "../../..",
  "cases": [
   "examples/support_agent/cases.jsonl",
-  "examples/support_agent/added/cases-generated-20261120-213117.jsonl"
+  "examples/support_agent/added/cases-generated-20261120-213117.jsonl",
+  "examples/support_agent/added/cases-from-plan-20261124-191821.jsonl"
  ]
 }

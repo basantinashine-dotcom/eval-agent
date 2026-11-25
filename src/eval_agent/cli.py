@@ -14,6 +14,7 @@
     eval-agent mutate                             break a copy of the agent on purpose; see if the tests notice
     eval-agent label                              label some answers yourself, to check the judges
     eval-agent calibrate                          see how often each judge agrees with your labels
+    eval-agent add-examples                       write the extra examples the approved plan asked for
     eval-agent export                             make the tests run on their own: writes evals/run.py
     eval-agent run                                run the tests and report (3 tries per example)
 """
@@ -811,6 +812,94 @@ def cmd_calibrate(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_add_examples(args: argparse.Namespace) -> int:
+    from dataclasses import asdict
+
+    from .analyze import MODEL, describe_target
+    from .dataset import Case, DatasetReport
+    from .expect import merge, write_expectations
+    from .generate import MAX_COUNT, batches, build_prompt, count_in, estimate_cost, fake_tool_names
+    from .generate import generate_for_plan
+    from .trace import write_jsonl
+
+    evals = args.evals
+    state = _built(evals)
+    if state is None:
+        return 1
+    if not state.is_approved:
+        print(f"The plan in {evals} isn't approved yet. Approve it first.")
+        return 1
+    asked = list(state.plan().cases_to_add)
+    if not asked:
+        print("Your plan doesn't ask for more examples.")
+        return 0
+    facts = state.plan_facts()
+    target = load_target(args.target or facts.target)
+    agent, tools = describe_target(target), fake_tool_names(target)
+    world = getattr(target, "example_world", None) or {}
+    existing = [Case(**c) for c in facts.cases]
+    config_path = evals / "run_config.json"
+    config = json.loads(config_path.read_text(encoding="utf-8")) if config_path.exists() else None
+    for name in (config or {}).get("cases", []):
+        if Path(name).exists():
+            existing += [c for c in load_cases(name)[0] if c.id not in {e.id for e in existing}]
+    first = next((r.cases_file for r in facts.runs if r.cases_file), "")
+    report = (load_cases(first)[1] if first and Path(first).exists()
+              else DatasetReport(path="examples", cases=len(existing)))
+    model = args.model or MODEL
+    groups = batches(asked)
+    total = sum(count_in(line) for line in asked)
+    estimate = 0.4 + sum(estimate_cost(build_prompt(agent, existing, report, min(MAX_COUNT, sum(map(count_in, g))),
+                                                    world, g), sum(map(count_in, g)), model) for g in groups)
+    kinds = f"{len(asked)} kind{'' if len(asked) == 1 else 's'}"
+    in_batches = f"{len(groups)} batch{'' if len(groups) == 1 else 'es'}"
+    print(f"Writing the {total} extra examples your plan asked for ({kinds}, in {in_batches}), with {model}. "
+          f"Estimated cost: up to ${estimate:.2f}.")
+    if estimate > args.max_cost:
+        print(f"That's more than --max-cost (${args.max_cost:.2f}). Raise it to go ahead.")
+        return 1
+
+    def progress(group: list[str], new: list[Case]) -> None:
+        print(f"  wrote {len(new)} for {len(group)} kinds, starting with: {group[0][:70]}", flush=True)
+
+    kept, dropped, spend = asyncio.run(generate_for_plan(agent, existing, report, tools, asked, model=model,
+                                                         example_world=world, on_batch=progress))
+    if not kept:
+        print("None of the examples could be used:\n" + "\n".join(f"  - {d}" for d in dropped))
+        return 1
+    stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
+    base = Path(first) if first else Path("cases.jsonl")
+    out = base.parent / "added" / f"{base.stem}-from-plan-{stamp}.jsonl"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    write_jsonl(out, [asdict(c) for c in kept])
+
+    print(f"\nWorking out which checks apply to each new example...")
+    current = json.loads((evals / "expectations.json").read_text(encoding="utf-8"))
+    entries, problems, notes, spend2 = asyncio.run(write_expectations(
+        state, (evals / "checks.py").read_text(encoding="utf-8"), current, kept, model=model))
+    (evals / "expectations.json").write_text(json.dumps(merge(current, entries), indent=1, ensure_ascii=False) + "\n",
+                                             encoding="utf-8")
+    if config is not None:
+        name = out.resolve().relative_to(Path.cwd().resolve()).as_posix() if out.resolve().is_relative_to(
+            Path.cwd().resolve()) else str(out)
+        if name not in config["cases"]:
+            config["cases"].append(name)
+            config_path.write_text(json.dumps(config, indent=1) + "\n", encoding="utf-8")
+
+    print(f"\nI wrote {len(kept)} new examples to {out}.")
+    if dropped:
+        print(f"I left out {len(dropped)} that couldn't run as written:\n" + "\n".join(f"  - {d}" for d in dropped))
+    specific = sum(1 for c in kept if c.id in entries)
+    print(f"{specific} of {len(kept)} have checks set just for them; the rest use only the checks for every example.")
+    for line in problems + notes:
+        print(f"  - {line}")
+    print(f"Cost: ${spend.cost_usd + spend2.cost_usd:.2f}.")
+    if config is not None:
+        print(f"\nThey're added to {evals / 'run.py'}. Try them once:\n"
+              f"  python {evals / 'run.py'} --quick --only {','.join(c.id for c in kept)}")
+    return 0
+
+
 def cmd_export(args: argparse.Namespace) -> int:
     from .export import export
 
@@ -922,6 +1011,13 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--recheck", action="store_true", help="try rewritten questions on the answers you gave; "
                    "reports only, never makes a judge trusted")
     p.set_defaults(func=cmd_calibrate)
+
+    p = sub.add_parser("add-examples", help="write the extra examples the approved plan asked for")
+    p.add_argument("--evals", type=Path, default=Path("evals"), help="where the plan and tests are (default: evals)")
+    p.add_argument("--target", help="module.path:function that starts your agent (default: the plan's)")
+    p.add_argument("--model", help="Claude model to write with (default: claude-opus-5-5)")
+    p.add_argument("--max-cost", type=float, default=3.0, help="stop if the estimate is above this, in $")
+    p.set_defaults(func=cmd_add_examples)
 
     p = sub.add_parser("export", help="make the tests folder run on its own: writes evals/run.py")
     p.add_argument("--evals", type=Path, default=Path("evals"), help="where the built tests are (default: evals)")
